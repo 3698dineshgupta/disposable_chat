@@ -102,19 +102,19 @@ export function useMessages(conversation: Conversation | null, cryptoCtx: Crypto
     senderId: string
   ): Promise<string | null> => {
     if (!cryptoCtx.myPrivateKey || !cryptoCtx.theirPublicKeyB64) return null;
+    if (!payload?.ciphertext || !payload?.iv) return null;
     try {
       const sharedSecret = await getOrDeriveSharedSecret(cryptoCtx.myPrivateKey, cryptoCtx.theirPublicKeyB64);
 
-      /* Verify signature */
       if (payload.signature && cryptoCtx.theirSigningPublicKeyB64) {
         const signingKey = await importSigningPublicKey(cryptoCtx.theirSigningPublicKeyB64);
         const valid = await verifySignature(signingKey, payload.signature, b64toBuf(payload.ciphertext));
         if (!valid) console.warn('[E2EE] Signature verification failed for', senderId);
       }
 
-      return decryptMessage(sharedSecret, payload.ciphertext, payload.iv);
+      return await decryptMessage(sharedSecret, payload.ciphertext, payload.iv);
     } catch (err) {
-      console.error('[decrypt error]', err);
+      console.warn('[decrypt failed — key mismatch or corrupted payload]', (err as Error)?.message ?? err);
       return null;
     }
   }, [cryptoCtx]);
@@ -131,55 +131,53 @@ export function useMessages(conversation: Conversation | null, cryptoCtx: Crypto
       localId?: string;
       timestamp: string;
     }) => {
-      if (data.conversationId !== conversationId) return;
-      if (data.senderId === user.id) return;
-      if (data.localId && processingRef.current.has(data.localId)) return;
-      if (data.localId) processingRef.current.add(data.localId);
+      try {
+        if (data.conversationId !== conversationId) return;
+        if (data.senderId === user.id) return;
+        if (data.localId && processingRef.current.has(data.localId)) return;
+        if (data.localId) processingRef.current.add(data.localId);
 
-      const decrypted = await decryptPayload(data.encryptedPayload, data.senderId);
-      if (!decrypted && data.messageType === 'text') return;
+        const decrypted = await decryptPayload(data.encryptedPayload, data.senderId);
+        // Skip undeliverable messages (null means keys missing or mismatch)
+        if (!decrypted) return;
 
-      // For non-text messages the encrypted content IS the mediaUrl
-      const isMedia = data.messageType !== 'text' && data.messageType !== 'system';
-      const localId = data.localId ?? uuidv4();
-      const msg: LocalMessage = {
-        localId,
-        conversationId,
-        senderId: data.senderId,
-        type: data.messageType,
-        text:     isMedia ? undefined : (decrypted ?? undefined),
-        mediaUrl: isMedia ? (decrypted ?? null) : null,
-        reactions: [],
-        status: 'delivered',
-        timestamp: data.timestamp,
-        isMine: false,
-        replyTo:   data.encryptedPayload.metadata?.replyTo   ?? null,
-        fileName:  data.encryptedPayload.metadata?.fileName  ?? null,
-        fileSize:  data.encryptedPayload.metadata?.fileSize  ?? null,
-        fileMime:  data.encryptedPayload.metadata?.fileMime  ?? null,
-        duration:  data.encryptedPayload.metadata?.duration  ?? null,
-      };
+        const isMedia = data.messageType !== 'text' && data.messageType !== 'system';
+        const localId = data.localId ?? uuidv4();
+        const msg: LocalMessage = {
+          localId,
+          conversationId,
+          senderId: data.senderId,
+          type: data.messageType,
+          text:     isMedia ? undefined : decrypted,
+          mediaUrl: isMedia ? decrypted : null,
+          reactions: [],
+          status: 'delivered',
+          timestamp: data.timestamp,
+          isMine: false,
+          replyTo:   data.encryptedPayload?.metadata?.replyTo   ?? null,
+          fileName:  data.encryptedPayload?.metadata?.fileName  ?? null,
+          fileSize:  data.encryptedPayload?.metadata?.fileSize  ?? null,
+          fileMime:  data.encryptedPayload?.metadata?.fileMime  ?? null,
+          duration:  data.encryptedPayload?.metadata?.duration  ?? null,
+        };
 
-      addMessage(msg);
-      await saveMessage(msg);
+        addMessage(msg);
+        await saveMessage(msg);
 
-      const sock = getSocket();
-
-      /* Mark as seen immediately — ChatWindow is mounted so the user is looking at this conversation */
-      sock?.emit('message:seen', {
-        conversationId,
-        localIds: [localId],
-        senderId: data.senderId,
-      });
-      await updateMessageStatus(localId, 'seen');
-      updateMessage(localId, { status: 'seen' });
-      useChatStore.getState().updateConversation(conversationId, {
-        unreadCount: 0,
-        last_read_at: new Date().toISOString(),
-      });
+        const sock = getSocket();
+        sock?.emit('message:seen', { conversationId, localIds: [localId], senderId: data.senderId });
+        await updateMessageStatus(localId, 'seen');
+        updateMessage(localId, { status: 'seen' });
+        useChatStore.getState().updateConversation(conversationId, {
+          unreadCount: 0,
+          last_read_at: new Date().toISOString(),
+        });
+      } catch (err) {
+        console.error('[message handler error]', err);
+      }
     };
 
-    const unsub = messageBus.on((raw) => handler(raw as Parameters<typeof handler>[0]));
+    const unsub = messageBus.on((raw) => { handler(raw as Parameters<typeof handler>[0]).catch(console.error); });
     return unsub;
   }, [conversationId, user, decryptPayload, addMessage, updateMessage]);
 
@@ -199,12 +197,16 @@ export function useMessages(conversation: Conversation | null, cryptoCtx: Crypto
       const idsToAck: string[] = [];
 
       for (const m of queued) {
+        // Always acknowledge the DB row — even if we can't decrypt, clean it up
+        if (m.pendingDbId) idsToAck.push(m.pendingDbId);
+
         if (m.senderId === user.id) continue;
         if (m.localId && processingRef.current.has(m.localId)) continue;
         if (m.localId) processingRef.current.add(m.localId);
 
         const decrypted = await decryptPayload(m.encryptedPayload, m.senderId);
-        if (!decrypted && m.messageType === 'text') continue;
+        // Skip messages that can't be decrypted (key mismatch from old session)
+        if (!decrypted) continue;
 
         const isMedia = m.messageType !== 'text' && m.messageType !== 'system';
         const localId = m.localId ?? uuidv4();
@@ -213,8 +215,8 @@ export function useMessages(conversation: Conversation | null, cryptoCtx: Crypto
           conversationId,
           senderId: m.senderId,
           type: m.messageType as MessageType,
-          text:     isMedia ? undefined : (decrypted ?? undefined),
-          mediaUrl: isMedia ? (decrypted ?? null) : null,
+          text:     isMedia ? undefined : decrypted,
+          mediaUrl: isMedia ? decrypted : null,
           reactions: [],
           status: 'delivered',
           timestamp: m.timestamp,
@@ -228,18 +230,16 @@ export function useMessages(conversation: Conversation | null, cryptoCtx: Crypto
 
         addMessage(msg);
         await saveMessage(msg);
-        if (m.pendingDbId) idsToAck.push(m.pendingDbId);
       }
 
       if (idsToAck.length > 0) {
         socket?.emit('messages:acknowledge', { messageIds: idsToAck });
       }
 
-      // Mark everything seen now that the window is open
       await markAllSeenInConv();
     };
 
-    processQueue();
+    processQueue().catch(console.error);
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [conversationId, isLoading, cryptoCtx.myPrivateKey, cryptoCtx.theirPublicKeyB64]);
 
