@@ -1,7 +1,6 @@
 /** @type {import('next').NextConfig} */
 const nextConfig = {
   reactStrictMode: true,
-  output: 'standalone',
   images: {
     remotePatterns: [
       { protocol: 'https', hostname: '**.supabase.co' },
@@ -9,9 +8,7 @@ const nextConfig = {
       { protocol: 'https', hostname: '**.googleusercontent.com' },
     ],
     dangerouslyAllowSVG: true,
-  },
-  experimental: {
-    serverComponentsExternalPackages: ['simple-peer'],
+    unoptimized: true,
   },
 };
 
