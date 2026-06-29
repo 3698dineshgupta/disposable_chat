@@ -7,7 +7,6 @@ import { useUIStore } from '@/store/ui';
 import { useAuthStore } from '@/store/auth';
 import { useSocketSetup } from '@/hooks/useSocket';
 import { setAccessToken } from '@/lib/api';
-import { authApi } from '@/lib/api';
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -37,29 +36,11 @@ function ThemeManager() {
 }
 
 function AuthInitializer() {
-  const { setInitializing, login, logout, accessToken, user } = useAuthStore();
+  const { setInitializing } = useAuthStore();
 
   useEffect(() => {
-    const init = async () => {
-      /* Restore access token from memory (if page was refreshed, try refresh endpoint) */
-      if (!accessToken && user) {
-        try {
-          const res = await authApi.refresh();
-          const newToken: string = res.data.accessToken;
-          setAccessToken(newToken);
-          useAuthStore.getState().setAccessToken(newToken);
-          /* Re-fetch profile to make sure user data is fresh */
-          const meRes = await authApi.me();
-          login(meRes.data.user, newToken);
-        } catch {
-          logout();
-        }
-      } else if (accessToken) {
-        setAccessToken(accessToken);
-      }
-      setInitializing(false);
-    };
-    init();
+    // No session restoration — user must log in fresh on every page load
+    setInitializing(false);
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   return null;
@@ -83,8 +64,7 @@ function MobileViewDetector() {
 
 function StoreHydrator() {
   useEffect(() => {
-    useAuthStore.persist.rehydrate();
-    useUIStore.persist.rehydrate();
+    useUIStore.persist.rehydrate(); // restore theme preference only
   }, []);
   return null;
 }

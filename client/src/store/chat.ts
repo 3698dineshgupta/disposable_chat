@@ -92,11 +92,9 @@ export const useChatStore = create<ChatState>()((set, get) => ({
   addMessage: (msg) =>
     set((s) => {
       const existing = s.messages[msg.conversationId] ?? [];
-      const deduped = existing.some((m) => m.localId === msg.localId)
-        ? existing.map((m) => (m.localId === msg.localId ? { ...m, ...msg } : m))
-        : [...existing, msg];
+      if (existing.some((m) => m.localId === msg.localId)) return s; // already in store, no-op
       return {
-        messages: { ...s.messages, [msg.conversationId]: deduped },
+        messages: { ...s.messages, [msg.conversationId]: [...existing, msg] },
         conversations: s.conversations.map((c) =>
           c.id === msg.conversationId
             ? { ...c, lastMessage: msg, updated_at: msg.timestamp }

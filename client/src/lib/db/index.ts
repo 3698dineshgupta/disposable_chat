@@ -32,7 +32,11 @@ export function getDB(): ZapChatDB {
 
 /* ── Message operations ── */
 export async function saveMessage(msg: LocalMessage): Promise<void> {
-  await getDB().messages.put(msg);
+  try {
+    await getDB().messages.add(msg);
+  } catch {
+    // ConstraintError: message already in IndexedDB — preserve existing status
+  }
 }
 
 export async function saveMessages(msgs: LocalMessage[]): Promise<void> {

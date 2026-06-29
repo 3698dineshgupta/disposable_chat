@@ -3,6 +3,7 @@
 import { useEffect, useRef } from 'react';
 import { Phone, PhoneOff, Video } from 'lucide-react';
 import { useCallStore } from '@/store/call';
+import { getSocket } from '@/lib/socket';
 import Avatar from '@/components/ui/Avatar';
 
 export default function IncomingCallModal() {
@@ -146,6 +147,3 @@ export default function IncomingCallModal() {
   );
 }
 
-function getSocket() {
-  try { return require('@/lib/socket').getSocket(); } catch { return null; }
-}
