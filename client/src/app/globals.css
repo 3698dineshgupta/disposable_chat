@@ -1,0 +1,213 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:ital,opsz,wght@0,14..32,300;0,14..32,400;0,14..32,500;0,14..32,600;0,14..32,700;0,14..32,800&display=swap');
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ── Design tokens ── */
+:root {
+  --brand: 0 168 132;
+  --brand-dark: 0 146 115;
+
+  --bg-primary: 250 250 250;
+  --bg-secondary: 255 255 255;
+  --bg-surface: 245 245 245;
+  --bg-elevated: 255 255 255;
+  --chat-bg: 234 230 221;       /* #eae6dd — WhatsApp beige */
+  --chat-sidebar: 255 255 255;
+  --chat-header: 240 242 245;   /* #f0f2f5 — WhatsApp header */
+  --chat-mine: 212 244 200;     /* #d4f4c8 — sent bubble */
+  --chat-theirs: 255 255 255;   /* received bubble */
+  --chat-border: 218 218 218;
+  --text-primary: 17 27 33;
+  --text-secondary: 102 117 127;
+  --text-muted: 130 150 160;
+
+  --shadow-brand: 0 8px 32px -4px rgba(0, 168, 132, 0.35);
+  --shadow-card: 0 4px 24px rgba(0,0,0,0.08), 0 1px 4px rgba(0,0,0,0.04);
+  --shadow-elevated: 0 12px 40px rgba(0,0,0,0.12), 0 2px 8px rgba(0,0,0,0.06);
+}
+
+.dark {
+  --bg-primary: 11 20 26;
+  --bg-secondary: 17 27 33;
+  --bg-surface: 23 35 42;
+  --bg-elevated: 30 44 52;
+  --chat-bg: 11 20 26;
+  --chat-sidebar: 17 27 33;
+  --chat-header: 23 35 42;
+  --chat-mine: 5 97 78;
+  --chat-theirs: 31 44 52;
+  --chat-border: 38 57 67;
+  --text-primary: 225 230 235;
+  --text-secondary: 134 150 160;
+  --text-muted: 84 101 111;
+
+  --shadow-card: 0 4px 24px rgba(0,0,0,0.3), 0 1px 4px rgba(0,0,0,0.2);
+  --shadow-elevated: 0 12px 40px rgba(0,0,0,0.5), 0 2px 8px rgba(0,0,0,0.3);
+}
+
+/* ── Base ── */
+*, *::before, *::after { box-sizing: border-box; }
+
+html, body { height: 100%; }
+
+body {
+  background-color: rgb(var(--bg-primary));
+  color: rgb(var(--text-primary));
+  font-family: 'Inter', system-ui, -apple-system, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* ── Scrollbars ── */
+::-webkit-scrollbar { width: 4px; height: 4px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: rgba(var(--text-muted), 0.35); border-radius: 99px; }
+::-webkit-scrollbar-thumb:hover { background: rgba(var(--text-muted), 0.6); }
+
+/* ── Selection ── */
+::selection { background: rgba(var(--brand), 0.25); }
+
+/* ── Glass utility ── */
+.glass {
+  background: rgba(var(--bg-elevated), 0.65);
+  backdrop-filter: blur(20px) saturate(180%);
+  -webkit-backdrop-filter: blur(20px) saturate(180%);
+  border: 1px solid rgba(var(--chat-border), 0.4);
+}
+
+/* ── 3D button ── */
+.btn-3d {
+  transform-style: preserve-3d;
+  transition: transform 0.12s ease, box-shadow 0.12s ease;
+}
+.btn-3d:hover  { transform: translateY(-2px) scale(1.01); }
+.btn-3d:active { transform: translateY(1px) scale(0.98); }
+
+/* ── Animated gradient orb ── */
+@keyframes float-orb {
+  0%, 100% { transform: translate(0, 0) scale(1); }
+  33%       { transform: translate(40px, -50px) scale(1.06); }
+  66%       { transform: translate(-30px, 25px) scale(0.96); }
+}
+.orb {
+  position: absolute;
+  border-radius: 50%;
+  filter: blur(80px);
+  animation: float-orb 14s ease-in-out infinite;
+  pointer-events: none;
+  will-change: transform;
+}
+
+/* ── Shine text animation ── */
+@keyframes shine {
+  0%   { background-position: -200% center; }
+  100% { background-position: 200% center; }
+}
+.shine-text {
+  background: linear-gradient(100deg, rgb(var(--brand)) 0%, #5fffc9 45%, rgb(var(--brand)) 100%);
+  background-size: 200% auto;
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+  animation: shine 3s linear infinite;
+}
+
+/* ── Floating label field ── */
+.field-root { position: relative; }
+
+.field-input {
+  width: 100%;
+  background: rgba(var(--bg-surface), 0.5);
+  border: 1.5px solid rgba(var(--chat-border), 0.8);
+  border-radius: 14px;
+  padding: 22px 16px 8px;
+  font-size: 15px;
+  font-family: inherit;
+  color: rgb(var(--text-primary));
+  transition: border-color 0.2s, box-shadow 0.2s, background 0.2s;
+  outline: none;
+  appearance: none;
+}
+.field-input::placeholder { opacity: 0; pointer-events: none; }
+
+.field-input:focus {
+  border-color: rgba(var(--brand), 0.9);
+  background: rgba(var(--bg-elevated), 0.9);
+  box-shadow: 0 0 0 3px rgba(var(--brand), 0.15), 0 2px 12px rgba(0,0,0,0.06);
+}
+
+.field-label {
+  position: absolute;
+  left: 16px;
+  top: 50%;
+  transform: translateY(-50%);
+  font-size: 15px;
+  color: rgb(var(--text-muted));
+  pointer-events: none;
+  transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+  user-select: none;
+}
+
+.field-input:focus ~ .field-label,
+.field-input:not(:placeholder-shown) ~ .field-label {
+  top: 9px;
+  transform: none;
+  font-size: 10.5px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: rgba(var(--brand), 1);
+}
+
+/* ── Spin ── */
+@keyframes spin { to { transform: rotate(360deg); } }
+
+/* ── Typing dots ── */
+@keyframes typing-dot {
+  0%, 60%, 100% { transform: translateY(0); opacity: 0.35; }
+  30%            { transform: translateY(-5px); opacity: 1; }
+}
+.typing-dot { animation: typing-dot 1.4s ease-in-out infinite; }
+.typing-dot:nth-child(2) { animation-delay: 0.16s; }
+.typing-dot:nth-child(3) { animation-delay: 0.32s; }
+
+/* ── Waveform bars ── */
+@keyframes wave-bar {
+  0%, 100% { transform: scaleY(0.3); }
+  50%       { transform: scaleY(1); }
+}
+.wave-bar { animation: wave-bar 0.7s ease-in-out infinite; transform-origin: bottom; }
+.wave-bar:nth-child(2) { animation-delay: 0.12s; }
+.wave-bar:nth-child(3) { animation-delay: 0.24s; }
+.wave-bar:nth-child(4) { animation-delay: 0.36s; }
+.wave-bar:nth-child(5) { animation-delay: 0.48s; }
+
+/* ── Pulse ring (call) ── */
+@keyframes pulse-ring {
+  0%   { transform: scale(1); opacity: 0.6; }
+  100% { transform: scale(2.5); opacity: 0; }
+}
+.pulse-ring   { animation: pulse-ring 1.8s cubic-bezier(0.2,0.6,0.4,1) infinite; }
+.pulse-ring-2 { animation: pulse-ring 1.8s cubic-bezier(0.2,0.6,0.4,1) 0.6s infinite; }
+
+/* ── WhatsApp-style chat background ── */
+.chat-wallpaper {
+  background-color: rgb(var(--chat-bg));
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='80' height='80'%3E%3Cg fill='none' stroke='%23000' stroke-opacity='.03' stroke-width='1'%3E%3Crect x='10' y='10' width='12' height='9' rx='2'/%3E%3Cline x1='12' y1='19' x2='10' y2='22'/%3E%3Ccircle cx='55' cy='18' r='6'/%3E%3Cline x1='55' y1='24' x2='55' y2='32'/%3E%3Cline x1='51' y1='28' x2='59' y2='28'/%3E%3Crect x='30' y='50' width='10' height='7' rx='1.5'/%3E%3Cpath d='M32 57l-2 3h6'/%3E%3Ccircle cx='14' cy='56' r='4'/%3E%3Cpath d='M10 60 Q14 70 18 60'/%3E%3Cpath d='M60 44 Q65 38 70 44 Q65 50 60 44z'/%3E%3C/g%3E%3C/svg%3E");
+}
+.dark .chat-wallpaper {
+  background-color: rgb(var(--chat-bg));
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='80' height='80'%3E%3Cg fill='none' stroke='%23fff' stroke-opacity='.025' stroke-width='1'%3E%3Crect x='10' y='10' width='12' height='9' rx='2'/%3E%3Cline x1='12' y1='19' x2='10' y2='22'/%3E%3Ccircle cx='55' cy='18' r='6'/%3E%3Cline x1='55' y1='24' x2='55' y2='32'/%3E%3Cline x1='51' y1='28' x2='59' y2='28'/%3E%3Crect x='30' y='50' width='10' height='7' rx='1.5'/%3E%3Cpath d='M32 57l-2 3h6'/%3E%3Ccircle cx='14' cy='56' r='4'/%3E%3Cpath d='M10 60 Q14 70 18 60'/%3E%3Cpath d='M60 44 Q65 38 70 44 Q65 50 60 44z'/%3E%3C/g%3E%3C/svg%3E");
+}
+
+/* ── Message bubble tails ── */
+.bubble-mine {
+  position: relative;
+  border-radius: 12px 4px 12px 12px;
+}
+.bubble-theirs {
+  position: relative;
+  border-radius: 4px 12px 12px 12px;
+}
