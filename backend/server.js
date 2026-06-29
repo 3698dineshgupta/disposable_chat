@@ -22,22 +22,35 @@ const statusRoutes = require('./src/routes/status');
 const app = express();
 const server = http.createServer(app);
 
-/* ── Socket.IO ── */
-const allowedOrigins = [
-  process.env.CLIENT_URL || 'http://localhost:3000',
-  'http://localhost:3000',
-  'http://localhost:10000',
-];
+/* ── CORS origin checker ── */
+function isAllowedOrigin(origin) {
+  if (!origin) return true; // server-to-server / curl
+  if (origin.includes('localhost')) return true;
+  if (origin.endsWith('.vercel.app')) return true;
+  if (origin.endsWith('.onrender.com')) return true;
+  const clientUrl = process.env.CLIENT_URL || '';
+  if (clientUrl && origin === clientUrl) return true;
+  return false;
+}
 
+const corsOptions = {
+  origin: (origin, cb) => isAllowedOrigin(origin) ? cb(null, true) : cb(new Error('CORS: origin not allowed')),
+  credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
+};
+
+/* ── Socket.IO ── */
 const io = new Server(server, {
-  cors: { origin: allowedOrigins, methods: ['GET', 'POST'], credentials: true },
+  cors: corsOptions,
   pingTimeout: 60000,
   pingInterval: 25000,
+  transports: ['websocket', 'polling'],
 });
 
 /* ── Security ── */
 app.use(helmet({ contentSecurityPolicy: false, crossOriginEmbedderPolicy: false }));
-app.use(cors({ origin: allowedOrigins, credentials: true }));
+app.use(cors(corsOptions));
+app.options('*', cors(corsOptions));
 app.use(cookieParser());
 
 /* ── Rate Limiting ── */
