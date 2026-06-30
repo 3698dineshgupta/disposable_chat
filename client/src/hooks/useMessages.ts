@@ -153,11 +153,17 @@ export function useMessages(conversation: Conversation | null, cryptoCtx: Crypto
         if (data.conversationId !== conversationId) return;
         if (data.senderId === user.id) return;
         if (data.localId && processingRef.current.has(data.localId)) return;
-        if (data.localId) processingRef.current.add(data.localId);
+        // NOTE: do NOT add to processingRef yet — only mark it after decryption
+        // succeeds. If decryption returns null (keys not ready), the message stays
+        // unprocessed so the queue can retry it once cryptoCtx is fully loaded.
 
         const decrypted = await decryptPayload(data.encryptedPayload, data.senderId);
-        // Skip undeliverable messages (null means keys missing or mismatch)
-        if (!decrypted) return;
+        if (!decrypted) return; // keys not ready — will be retried from queue
+
+        // Re-check after the async gap: the queue processor may have already
+        // handled this message while we were awaiting decryption.
+        if (data.localId && processingRef.current.has(data.localId)) return;
+        if (data.localId) processingRef.current.add(data.localId);
 
         const isMedia = data.messageType !== 'text' && data.messageType !== 'system';
         const localId = data.localId ?? uuidv4();
@@ -220,11 +226,13 @@ export function useMessages(conversation: Conversation | null, cryptoCtx: Crypto
 
         if (m.senderId === user.id) continue;
         if (m.localId && processingRef.current.has(m.localId)) continue;
-        if (m.localId) processingRef.current.add(m.localId);
 
         const decrypted = await decryptPayload(m.encryptedPayload, m.senderId);
-        // Skip messages that can't be decrypted (key mismatch from old session)
-        if (!decrypted) continue;
+        if (!decrypted) continue; // key mismatch — skip
+
+        // Re-check after async gap before marking (messageBus may have raced us)
+        if (m.localId && processingRef.current.has(m.localId)) continue;
+        if (m.localId) processingRef.current.add(m.localId);
 
         const isMedia = m.messageType !== 'text' && m.messageType !== 'system';
         const localId = m.localId ?? uuidv4();
