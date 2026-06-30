@@ -7,113 +7,213 @@ import {
 } from 'lucide-react';
 import { useCallStore } from '@/store/call';
 import { getSocket } from '@/lib/socket';
+import { callsApi } from '@/lib/api';
 import Avatar from '@/components/ui/Avatar';
 import { formatDuration } from '@/lib/utils';
 import toast from 'react-hot-toast';
 
+/* ─────────────────────────────────────────────────────
+ * Constants
+ * ───────────────────────────────────────────────────── */
+const CALL_RING_TIMEOUT_MS = 45_000; // give up if no answer after 45 s
+const LOG_PREFIX = '[WebRTC]';
+
+const log = (...args: unknown[]) => console.log(LOG_PREFIX, ...args);
+const warn = (...args: unknown[]) => console.warn(LOG_PREFIX, ...args);
+
+/* ─────────────────────────────────────────────────────
+ * ICE server helper
+ * ───────────────────────────────────────────────────── */
+const FALLBACK_ICE: RTCIceServer[] = [
+  { urls: 'stun:stun.l.google.com:19302' },
+  { urls: 'stun:stun1.l.google.com:19302' },
+];
+
+async function getIceServers(): Promise<RTCIceServer[]> {
+  try {
+    const res = await callsApi.iceServers();
+    const servers = res.data?.iceServers;
+    if (Array.isArray(servers) && servers.length > 0) {
+      log('ICE servers loaded from backend:', servers.map(s => JSON.stringify(s.urls)));
+      return servers;
+    }
+  } catch (e) {
+    warn('Could not fetch ICE servers from backend, using fallback STUN:', (e as Error).message);
+  }
+  return FALLBACK_ICE;
+}
+
+/* ─────────────────────────────────────────────────────
+ * Component
+ * ───────────────────────────────────────────────────── */
 export default function CallScreen() {
   const {
     activeCall, endCall, setLocalStream, setRemoteStream,
     setMuted, setCameraOn, setCallStatus, setCallId,
   } = useCallStore();
 
-  const [elapsed, setElapsed]               = useState(0);
-  const [speaker, setSpeaker]               = useState(true);
+  const [elapsed, setElapsed]                 = useState(0);
+  const [speaker, setSpeaker]                 = useState(true);
   const [isScreenSharing, setIsScreenSharing] = useState(false);
-  const [showMoreMenu, setShowMoreMenu]     = useState(false);
-  const [facingMode, setFacingMode]         = useState<'user' | 'environment'>('user');
-  const [isMinimized, setIsMinimized]       = useState(false);
+  const [showMoreMenu, setShowMoreMenu]       = useState(false);
+  const [facingMode, setFacingMode]           = useState<'user' | 'environment'>('user');
+  const [isMinimized, setIsMinimized]         = useState(false);
 
-  const localVideoRef   = useRef<HTMLVideoElement>(null);
-  const remoteVideoRef  = useRef<HTMLVideoElement>(null);  // muted — video only
-  const remoteAudioRef  = useRef<HTMLAudioElement>(null);  // audio only
-  const peerRef         = useRef<RTCPeerConnection | null>(null);
+  /* ── DOM refs ── */
+  const localVideoRef  = useRef<HTMLVideoElement>(null);
+  const remoteVideoRef = useRef<HTMLVideoElement>(null);
+  const remoteAudioRef = useRef<HTMLAudioElement>(null);
+  const moreMenuRef    = useRef<HTMLDivElement>(null);
+
+  /* ── WebRTC state refs (not state — no re-render needed) ── */
+  const peerRef        = useRef<RTCPeerConnection | null>(null);
+  const localStreamRef = useRef<MediaStream | null>(null);     // BUG FIX: use ref, not store closure
   const screenStreamRef = useRef<MediaStream | null>(null);
-  const moreMenuRef     = useRef<HTMLDivElement>(null);
 
-  useEffect(() => {
-    if (!activeCall) return;
-    const timer = setInterval(() =>
-      setElapsed(Math.floor((Date.now() - activeCall.startedAt) / 1000)), 1000);
+  /* ── ICE buffering ── */
+  const iceCandidateBuffer = useRef<RTCIceCandidateInit[]>([]);
+  const remoteDescSetRef   = useRef(false);
 
-    setupWebRTC().catch((err) => {
-      console.error('[WebRTC] unhandled:', err);
-      toast.error('Call failed: ' + (err?.message ?? 'unknown'));
-      setCallStatus('failed');
-    });
+  /* ── Named socket handler refs (required for precise cleanup) ── */
+  const iceHandlerRef           = useRef<((d: { candidate: RTCIceCandidateInit; from: string }) => void) | null>(null);
+  const answeredHandlerRef      = useRef<((d: { callId: string; answer: RTCSessionDescriptionInit }) => void) | null>(null);
+  const restartOfferHandlerRef  = useRef<((d: { offer: RTCSessionDescriptionInit; from: string }) => void) | null>(null);
+  const restartAnswerHandlerRef = useRef<((d: { answer: RTCSessionDescriptionInit; from: string }) => void) | null>(null);
 
-    return () => { clearInterval(timer); cleanup(); };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeCall?.startedAt]);
+  /* ── Misc refs ── */
+  const callTimeoutRef      = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const disconnectTimerRef  = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const initialNegDoneRef   = useRef(false);
+  const activeCallRef       = useRef(activeCall); // keep current ref for callbacks
+  activeCallRef.current = activeCall;
 
-  /* Close more-menu on outside click */
-  useEffect(() => {
-    if (!showMoreMenu) return;
-    const close = (e: MouseEvent) => {
-      if (moreMenuRef.current && !moreMenuRef.current.contains(e.target as Node)) {
-        setShowMoreMenu(false);
+  /* ─────────────────────────────────────────────────────
+   * cleanup — stable ref, uses only refs (no stale closures)
+   * ───────────────────────────────────────────────────── */
+  const cleanup = useCallback(() => {
+    log('cleanup called');
+
+    // Cancel pending timers
+    if (callTimeoutRef.current)     { clearTimeout(callTimeoutRef.current);     callTimeoutRef.current = null; }
+    if (disconnectTimerRef.current) { clearTimeout(disconnectTimerRef.current); disconnectTimerRef.current = null; }
+
+    // Stop media tracks via refs (not store closures — store may be stale)
+    localStreamRef.current?.getTracks().forEach(t => { t.stop(); log(`stopped local track: ${t.kind}`); });
+    localStreamRef.current = null;
+    screenStreamRef.current?.getTracks().forEach(t => t.stop());
+    screenStreamRef.current = null;
+
+    // Remove named socket handlers
+    const socket = getSocket();
+    if (iceHandlerRef.current)           { socket?.off('call:ice',        iceHandlerRef.current);           iceHandlerRef.current = null; }
+    if (answeredHandlerRef.current)      { socket?.off('call:answered',   answeredHandlerRef.current);      answeredHandlerRef.current = null; }
+    if (restartOfferHandlerRef.current)  { socket?.off('call:offer',      restartOfferHandlerRef.current);  restartOfferHandlerRef.current = null; }
+    if (restartAnswerHandlerRef.current) { socket?.off('call:answer-sdp', restartAnswerHandlerRef.current); restartAnswerHandlerRef.current = null; }
+
+    // Clear ICE buffer and flags
+    iceCandidateBuffer.current = [];
+    remoteDescSetRef.current   = false;
+    initialNegDoneRef.current  = false;
+
+    // Close RTCPeerConnection
+    if (peerRef.current) {
+      peerRef.current.onicecandidate       = null;
+      peerRef.current.ontrack              = null;
+      peerRef.current.onconnectionstatechange = null;
+      peerRef.current.onnegotiationneeded  = null;
+      peerRef.current.onicegatheringstatechange = null;
+      peerRef.current.close();
+      peerRef.current = null;
+    }
+
+    // Clear media elements
+    if (remoteAudioRef.current) remoteAudioRef.current.srcObject = null;
+    if (remoteVideoRef.current) remoteVideoRef.current.srcObject = null;
+    if (localVideoRef.current)  localVideoRef.current.srcObject = null;
+  }, []); // stable — only uses refs
+
+  /* ─────────────────────────────────────────────────────
+   * ICE candidate helpers
+   * ───────────────────────────────────────────────────── */
+  const addIceCandidate = async (pc: RTCPeerConnection, candidate: RTCIceCandidateInit) => {
+    try {
+      if (pc.signalingState !== 'closed' && pc.remoteDescription) {
+        await pc.addIceCandidate(new RTCIceCandidate(candidate));
+      } else {
+        iceCandidateBuffer.current.push(candidate);
       }
-    };
-    document.addEventListener('mousedown', close);
-    return () => document.removeEventListener('mousedown', close);
-  }, [showMoreMenu]);
+    } catch (e) {
+      warn('addIceCandidate failed:', (e as Error).message);
+    }
+  };
 
-  const waitForIce = (pc: RTCPeerConnection): Promise<void> =>
-    new Promise((resolve) => {
-      if (pc.iceGatheringState === 'complete') { resolve(); return; }
-      const done = () => {
-        if (pc.iceGatheringState === 'complete') { pc.onicegatheringstatechange = null; resolve(); }
-      };
-      pc.onicegatheringstatechange = done;
-      setTimeout(() => { pc.onicegatheringstatechange = null; resolve(); }, 6000);
-    });
+  const flushIceCandidates = async (pc: RTCPeerConnection) => {
+    remoteDescSetRef.current = true;
+    const buffered = [...iceCandidateBuffer.current];
+    iceCandidateBuffer.current = [];
+    log(`flushing ${buffered.length} buffered ICE candidates`);
+    for (const c of buffered) {
+      try {
+        if (pc.signalingState !== 'closed') await pc.addIceCandidate(new RTCIceCandidate(c));
+      } catch (e) { warn('flush ICE candidate failed:', (e as Error).message); }
+    }
+  };
 
+  /* ─────────────────────────────────────────────────────
+   * setupWebRTC
+   * ───────────────────────────────────────────────────── */
   const setupWebRTC = async () => {
-    if (!activeCall) return;
+    const call = activeCallRef.current;
+    if (!call) return;
+
     const socket = getSocket();
     if (!socket?.connected) throw new Error('Socket not connected');
 
-    const pc = new RTCPeerConnection({
-      iceServers: [
-        { urls: 'stun:stun.l.google.com:19302' },
-        { urls: 'stun:stun1.l.google.com:19302' },
-      ],
-    });
-    peerRef.current = pc;
+    log(`setupWebRTC: callId=${call.callId} isInitiator=${call.isInitiator} type=${call.type}`);
 
-    /* Get local media */
+    /* Fetch ICE servers (includes TURN if configured on backend) */
+    const iceServers = await getIceServers();
+
+    const pc = new RTCPeerConnection({ iceServers, iceCandidatePoolSize: 10 });
+    peerRef.current = pc;
+    initialNegDoneRef.current = false;
+
+    /* ── Get local media ── */
+    let localStream: MediaStream | null = null;
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({
-        audio: true,
-        video: activeCall.type === 'video',
+      localStream = await navigator.mediaDevices.getUserMedia({
+        audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+        video: call.type === 'video' ? { facingMode: 'user', width: { ideal: 1280 }, height: { ideal: 720 } } : false,
       });
-      setLocalStream(stream);
-      if (localVideoRef.current) {
-        localVideoRef.current.srcObject = stream;
-        localVideoRef.current.play().catch(() => {});
-      }
-      stream.getTracks().forEach((t) => pc.addTrack(t, stream));
     } catch {
       try {
-        const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
-        setLocalStream(stream);
-        stream.getTracks().forEach((t) => pc.addTrack(t, stream));
-      } catch (err: any) {
-        console.warn('[WebRTC] no media available:', err.message);
+        localStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+        if (call.type === 'video') toast('Camera unavailable — audio only', { icon: '🎤' });
+      } catch (e) {
+        warn('no media available:', (e as Error).message);
         toast('Microphone unavailable', { icon: '🔇' });
       }
     }
 
-    /*
-     * Route remote tracks separately:
-     * - audio → hidden <audio> element (avoids browser autoplay restrictions on <video> with audio)
-     * - video → muted <video> element (autoplay always works for muted video)
-     */
+    if (localStream) {
+      localStreamRef.current = localStream;
+      setLocalStream(localStream);
+      if (localVideoRef.current) {
+        localVideoRef.current.srcObject = localStream;
+        localVideoRef.current.play().catch(() => {});
+      }
+      localStream.getTracks().forEach(t => {
+        pc.addTrack(t, localStream!);
+        log(`added local track: ${t.kind}`);
+      });
+    }
+
+    /* ── Remote track routing ── */
     pc.ontrack = (e) => {
+      log(`ontrack: kind=${e.track.kind} streams=${e.streams.length}`);
       const track = e.track;
       if (track.kind === 'audio') {
         if (remoteAudioRef.current) {
-          // Build or reuse a MediaStream for audio
           if (!(remoteAudioRef.current.srcObject instanceof MediaStream)) {
             remoteAudioRef.current.srcObject = new MediaStream();
           }
@@ -130,143 +230,215 @@ export default function CallScreen() {
           remoteVideoRef.current.play().catch(() => {});
         }
       }
-      // Also store in call store for external consumers
       if (e.streams?.[0]) setRemoteStream(e.streams[0]);
     };
 
-    /* ICE candidate exchange */
+    /* ── Trickle ICE — send candidates as they arrive ── */
     pc.onicecandidate = (e) => {
-      if (e.candidate) socket.emit('call:ice', { peerId: activeCall.peerId, candidate: e.candidate });
+      if (e.candidate) {
+        log(`sending ICE candidate: ${e.candidate.type} ${e.candidate.protocol}`);
+        socket.emit('call:ice', { peerId: call.peerId, candidate: e.candidate });
+      } else {
+        log('ICE gathering complete');
+      }
     };
 
-    const iceHandler = async ({ candidate }: { candidate: RTCIceCandidateInit }) => {
-      try {
-        if (pc.signalingState !== 'closed') await pc.addIceCandidate(new RTCIceCandidate(candidate));
-      } catch {}
+    /* ── Receive ICE candidates from peer ── */
+    const iceHandler = ({ candidate }: { candidate: RTCIceCandidateInit; from: string }) => {
+      addIceCandidate(pc, candidate);
     };
+    iceHandlerRef.current = iceHandler;
     socket.on('call:ice', iceHandler);
 
-    /* Connection state monitoring */
-    let disconnectTimer: ReturnType<typeof setTimeout> | null = null;
+    /* ── Connection state monitoring ── */
     pc.onconnectionstatechange = () => {
       const state = pc.connectionState;
+      log(`connection state: ${state}`);
       if (state === 'disconnected') {
-        disconnectTimer = setTimeout(() => {
-          if (pc.connectionState === 'disconnected' || pc.connectionState === 'failed') {
-            pc.restartIce();
+        disconnectTimerRef.current = setTimeout(() => {
+          if (peerRef.current?.connectionState === 'disconnected' || peerRef.current?.connectionState === 'failed') {
+            log('attempting ICE restart after disconnect');
+            peerRef.current?.restartIce();
           }
         }, 4000);
       } else if (state === 'connected') {
-        if (disconnectTimer) { clearTimeout(disconnectTimer); disconnectTimer = null; }
+        if (disconnectTimerRef.current) { clearTimeout(disconnectTimerRef.current); disconnectTimerRef.current = null; }
+        log('peers connected!');
       } else if (state === 'failed') {
-        if (disconnectTimer) { clearTimeout(disconnectTimer); disconnectTimer = null; }
+        if (disconnectTimerRef.current) { clearTimeout(disconnectTimerRef.current); disconnectTimerRef.current = null; }
+        warn('connection failed');
         toast.error('Call connection lost');
         setCallStatus('failed');
       }
     };
 
-    /*
-     * onnegotiationneeded is used ONLY for ICE restarts after initial setup.
-     * We skip the first fire (triggered by addTrack) to avoid conflicting with
-     * the manual offer/answer below.
-     */
-    let initialNegotiationDone = false;
+    /* ── ICE restart (renegotiation after initial setup) ── */
     pc.onnegotiationneeded = async () => {
-      if (!initialNegotiationDone) return;
-      if (!activeCall.isInitiator || pc.signalingState === 'closed') return;
+      if (!initialNegDoneRef.current) return; // skip first fire from addTrack
+      const currentCall = activeCallRef.current;
+      if (!currentCall?.isInitiator || pc.signalingState === 'closed') return;
+      log('onnegotiationneeded: sending restart offer');
       try {
         const restartOffer = await pc.createOffer({ iceRestart: true });
         await pc.setLocalDescription(restartOffer);
-        await waitForIce(pc);
-        socket.emit('call:offer', { peerId: activeCall.peerId, offer: pc.localDescription });
-      } catch (err) { console.error('[WebRTC] restart offer failed:', err); }
+        socket.emit('call:offer', { peerId: currentCall.peerId, offer: pc.localDescription });
+      } catch (err) { warn('restart offer failed:', (err as Error).message); }
     };
 
-    /* ICE restart handlers (responder side) */
-    const restartOfferHandler = async ({ offer }: { offer: RTCSessionDescriptionInit }) => {
-      if (activeCall.isInitiator || pc.signalingState === 'closed') return;
+    /* ── ICE restart handlers (responder side) ── */
+    const restartOfferHandler = async ({ offer }: { offer: RTCSessionDescriptionInit; from: string }) => {
+      const currentCall = activeCallRef.current;
+      if (currentCall?.isInitiator || pc.signalingState === 'closed') return;
+      log('received restart offer, sending restart answer');
       try {
         await pc.setRemoteDescription(new RTCSessionDescription(offer));
+        await flushIceCandidates(pc);
         const restartAnswer = await pc.createAnswer();
         await pc.setLocalDescription(restartAnswer);
-        await waitForIce(pc);
-        socket.emit('call:answer-sdp', { peerId: activeCall.peerId, answer: pc.localDescription });
-      } catch (err) { console.error('[WebRTC] restart answer failed:', err); }
+        socket.emit('call:answer-sdp', { peerId: currentCall!.peerId, answer: pc.localDescription });
+      } catch (err) { warn('restart answer failed:', (err as Error).message); }
     };
+    restartOfferHandlerRef.current = restartOfferHandler;
     socket.on('call:offer', restartOfferHandler);
 
-    const restartAnswerHandler = async ({ answer }: { answer: RTCSessionDescriptionInit }) => {
-      if (!activeCall.isInitiator || pc.signalingState === 'closed') return;
+    const restartAnswerHandler = async ({ answer }: { answer: RTCSessionDescriptionInit; from: string }) => {
+      const currentCall = activeCallRef.current;
+      if (!currentCall?.isInitiator || pc.signalingState === 'closed') return;
+      log('received restart answer');
       try {
         await pc.setRemoteDescription(new RTCSessionDescription(answer));
-      } catch (err) { console.error('[WebRTC] restart setAnswer failed:', err); }
+        await flushIceCandidates(pc);
+      } catch (err) { warn('restart setAnswer failed:', (err as Error).message); }
     };
+    restartAnswerHandlerRef.current = restartAnswerHandler;
     socket.on('call:answer-sdp', restartAnswerHandler);
 
-    /* ── Initial offer/answer exchange ── */
-    if (activeCall.status === 'calling') {
-      /* CALLER: create offer, send to callee */
+    /* ────────────────────────────────────────────────────
+     * TRICKLE ICE: send offer/answer IMMEDIATELY after
+     * setLocalDescription — do NOT wait for ICE gathering.
+     * ICE candidates stream via separate call:ice events.
+     * ──────────────────────────────────────────────────── */
+    if (call.isInitiator) {
+      /* ─── CALLER path ─── */
       if (pc.signalingState === 'closed') return;
+
       const offer = await pc.createOffer();
       await pc.setLocalDescription(offer);
-      await waitForIce(pc);
-      initialNegotiationDone = true;
+      initialNegDoneRef.current = true;
+      log('created offer, sending call:initiate');
 
-      socket.once('call:answered', async ({ answer }: { answer: RTCSessionDescriptionInit }) => {
+      /* Register answer handler BEFORE emitting — avoids race if callee answers instantly */
+      const answeredHandler = async ({ callId: incomingCallId, answer }: { callId: string; answer: RTCSessionDescriptionInit }) => {
+        log(`received call:answered callId=${incomingCallId}`);
         try {
           if (pc.signalingState !== 'closed') {
             await pc.setRemoteDescription(new RTCSessionDescription(answer));
+            await flushIceCandidates(pc);
             setCallStatus('answered');
+            if (callTimeoutRef.current) { clearTimeout(callTimeoutRef.current); callTimeoutRef.current = null; }
+            log('remote description set from answer');
           }
-        } catch (err) { console.error('[WebRTC] set answer failed:', err); }
-      });
+        } catch (err) { warn('set answer failed:', (err as Error).message); }
+      };
+      answeredHandlerRef.current = answeredHandler;
+      socket.on('call:answered', answeredHandler);
 
+      /* Ring timeout — emit missed and clean up if no answer */
+      callTimeoutRef.current = setTimeout(() => {
+        const c = activeCallRef.current;
+        if (c && (c.status === 'calling' || c.status === 'ringing')) {
+          log('call ring timeout — missed');
+          toast('No answer', { icon: '📵' });
+          socket.emit('call:missed', { callId: c.callId });
+          socket.emit('call:end',    { callId: c.callId, peerId: c.peerId, duration: 0 });
+          cleanup();
+          endCall();
+        }
+      }, CALL_RING_TIMEOUT_MS);
+
+      /* Emit the initiate event with the offer — trickle ICE starts flowing */
       socket.emit('call:initiate', {
-        calleeId:       activeCall.peerId,
-        type:           activeCall.type,
-        conversationId: activeCall.conversationId,
-        offer:          pc.localDescription,
+        calleeId:       call.peerId,
+        type:           call.type,
+        conversationId: call.conversationId,
+        offer:          pc.localDescription,  // send immediately, don't wait for ICE
       }, (res: { callId?: string; error?: string }) => {
-        if (res?.error) { toast.error('Could not reach the other user'); setCallStatus('failed'); return; }
-        if (res?.callId) setCallId(res.callId);
+        if (res?.error) {
+          warn('call:initiate error:', res.error);
+          toast.error('Could not reach the other user');
+          setCallStatus('failed');
+          cleanup();
+          endCall();
+          return;
+        }
+        if (res?.callId) {
+          setCallId(res.callId);
+          log('call:initiate ack, callId=', res.callId);
+        }
       });
 
     } else {
-      /* CALLEE: answer the incoming offer */
-      const offer = activeCall.incomingOffer;
-      if (!offer) { toast.error('Incoming offer missing'); setCallStatus('failed'); return; }
+      /* ─── CALLEE path ─── */
+      const incomingOffer = call.incomingOffer;
+      if (!incomingOffer) {
+        warn('incoming offer missing');
+        toast.error('Call failed: no offer received');
+        setCallStatus('failed');
+        return;
+      }
       if (pc.signalingState === 'closed') return;
 
-      await pc.setRemoteDescription(new RTCSessionDescription(offer));
+      log('setting remote description from incoming offer');
+      await pc.setRemoteDescription(new RTCSessionDescription(incomingOffer));
+      await flushIceCandidates(pc);
+
       const answer = await pc.createAnswer();
       await pc.setLocalDescription(answer);
-      await waitForIce(pc);
-      initialNegotiationDone = true;
+      initialNegDoneRef.current = true;
+      log('created answer, sending call:answer');
 
       socket.emit('call:answer', {
-        callId:   activeCall.callId,
-        callerId: activeCall.peerId,
-        answer:   pc.localDescription,
+        callId:   call.callId,
+        callerId: call.peerId,
+        answer:   pc.localDescription,  // send immediately, don't wait for ICE
       });
     }
   };
 
-  const cleanup = () => {
-    activeCall?.localStream?.getTracks().forEach((t) => t.stop());
-    screenStreamRef.current?.getTracks().forEach((t) => t.stop());
-    screenStreamRef.current = null;
-    peerRef.current?.close();
-    peerRef.current = null;
-    getSocket()?.off('call:ice');
-    getSocket()?.off('call:answered');
-    getSocket()?.off('call:offer');
-    getSocket()?.off('call:answer-sdp');
-    // Clear media elements
-    if (remoteAudioRef.current) { remoteAudioRef.current.srcObject = null; }
-    if (remoteVideoRef.current)  { remoteVideoRef.current.srcObject = null; }
-    if (localVideoRef.current)   { localVideoRef.current.srcObject = null; }
-  };
+  /* ─────────────────────────────────────────────────────
+   * Effect: run WebRTC when a call starts
+   * ───────────────────────────────────────────────────── */
+  useEffect(() => {
+    if (!activeCall) return;
 
+    const timer = setInterval(() =>
+      setElapsed(Math.floor((Date.now() - activeCall.startedAt) / 1000)), 1000);
+
+    setupWebRTC().catch((err) => {
+      warn('unhandled setupWebRTC error:', err);
+      toast.error('Call failed: ' + ((err as Error)?.message ?? 'unknown'));
+      setCallStatus('failed');
+    });
+
+    return () => { clearInterval(timer); cleanup(); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeCall?.startedAt]);
+
+  /* ── Close more-menu on outside click ── */
+  useEffect(() => {
+    if (!showMoreMenu) return;
+    const close = (e: MouseEvent) => {
+      if (moreMenuRef.current && !moreMenuRef.current.contains(e.target as Node)) {
+        setShowMoreMenu(false);
+      }
+    };
+    document.addEventListener('mousedown', close);
+    return () => document.removeEventListener('mousedown', close);
+  }, [showMoreMenu]);
+
+  /* ─────────────────────────────────────────────────────
+   * Control handlers
+   * ───────────────────────────────────────────────────── */
   const handleHangup = () => {
     if (activeCall) {
       getSocket()?.emit('call:end', { callId: activeCall.callId, peerId: activeCall.peerId, duration: elapsed });
@@ -276,16 +448,18 @@ export default function CallScreen() {
   };
 
   const toggleMute = () => {
-    if (!activeCall?.localStream) return;
-    const newMuted = !activeCall.isMuted;
-    activeCall.localStream.getAudioTracks().forEach((t) => (t.enabled = !newMuted));
+    const stream = localStreamRef.current;
+    if (!stream) return;
+    const newMuted = !(activeCall?.isMuted ?? false);
+    stream.getAudioTracks().forEach(t => (t.enabled = !newMuted));
     setMuted(newMuted);
   };
 
   const toggleCamera = () => {
-    if (!activeCall?.localStream) return;
-    const newOff = activeCall.isCameraOn;
-    activeCall.localStream.getVideoTracks().forEach((t) => (t.enabled = !newOff));
+    const stream = localStreamRef.current;
+    if (!stream) return;
+    const newOff = activeCall?.isCameraOn ?? false;
+    stream.getVideoTracks().forEach(t => (t.enabled = !newOff));
     setCameraOn(!newOff);
   };
 
@@ -299,7 +473,7 @@ export default function CallScreen() {
   };
 
   const flipCamera = useCallback(async () => {
-    if (!activeCall?.localStream || !peerRef.current) return;
+    if (!localStreamRef.current || !peerRef.current) return;
     const newFacing = facingMode === 'user' ? 'environment' : 'user';
     try {
       const newStream = await navigator.mediaDevices.getUserMedia({
@@ -307,26 +481,25 @@ export default function CallScreen() {
         video: { facingMode: newFacing },
       });
       const newTrack = newStream.getVideoTracks()[0];
-      const sender = peerRef.current.getSenders().find((s) => s.track?.kind === 'video');
+      const sender = peerRef.current.getSenders().find(s => s.track?.kind === 'video');
       if (sender) await sender.replaceTrack(newTrack);
       if (localVideoRef.current) {
-        const combined = new MediaStream([...activeCall.localStream.getAudioTracks(), newTrack]);
+        const combined = new MediaStream([...localStreamRef.current.getAudioTracks(), newTrack]);
         localVideoRef.current.srcObject = combined;
         localVideoRef.current.play().catch(() => {});
       }
       setFacingMode(newFacing);
-    } catch {
-      toast.error('Could not switch camera');
-    }
-  }, [facingMode, activeCall]);
+    } catch { toast.error('Could not switch camera'); }
+  }, [facingMode]);
 
   const startScreenShare = async () => {
     if (!peerRef.current) return;
     setShowMoreMenu(false);
     try {
-      const screenStream = await (navigator.mediaDevices as any).getDisplayMedia({ video: true, audio: false });
+      const screenStream = await (navigator.mediaDevices as unknown as { getDisplayMedia: (c: object) => Promise<MediaStream> })
+        .getDisplayMedia({ video: true, audio: false });
       const screenTrack = screenStream.getVideoTracks()[0];
-      const sender = peerRef.current.getSenders().find((s) => s.track?.kind === 'video');
+      const sender = peerRef.current.getSenders().find(s => s.track?.kind === 'video');
       if (sender) await sender.replaceTrack(screenTrack);
       if (localVideoRef.current) {
         localVideoRef.current.srcObject = screenStream;
@@ -339,24 +512,24 @@ export default function CallScreen() {
   };
 
   const stopScreenShare = async () => {
-    if (!peerRef.current || !activeCall?.localStream) return;
-    const cameraTrack = activeCall.localStream.getVideoTracks()[0];
-    const sender = peerRef.current.getSenders().find((s) => s.track?.kind === 'video');
+    if (!peerRef.current || !localStreamRef.current) return;
+    const cameraTrack = localStreamRef.current.getVideoTracks()[0];
+    const sender = peerRef.current.getSenders().find(s => s.track?.kind === 'video');
     if (sender && cameraTrack) await sender.replaceTrack(cameraTrack);
     if (localVideoRef.current) {
-      localVideoRef.current.srcObject = activeCall.localStream;
+      localVideoRef.current.srcObject = localStreamRef.current;
       localVideoRef.current.play().catch(() => {});
     }
-    screenStreamRef.current?.getTracks().forEach((t) => t.stop());
+    screenStreamRef.current?.getTracks().forEach(t => t.stop());
     screenStreamRef.current = null;
     setIsScreenSharing(false);
   };
 
   if (!activeCall) return null;
 
-  const isVideo   = activeCall.type === 'video';
-  const peerName  = activeCall.peerInfo?.display_name ?? 'User';
-  const isCalling = activeCall.status === 'calling' || activeCall.status === 'ringing';
+  const isVideo    = activeCall.type === 'video';
+  const peerName   = activeCall.peerInfo?.display_name ?? 'User';
+  const isCalling  = activeCall.status === 'calling' || activeCall.status === 'ringing';
   const isAnswered = activeCall.status === 'answered';
   const statusLabel =
     activeCall.status === 'calling'  ? 'Calling…'             :
@@ -382,7 +555,6 @@ export default function CallScreen() {
             {isAnswered ? formatDuration(elapsed) : '…'}
           </span>
         </div>
-        {/* Keep audio alive in minimized mode */}
         <audio ref={remoteAudioRef} autoPlay playsInline style={{ display: 'none' }} />
       </div>
     );
@@ -394,10 +566,8 @@ export default function CallScreen() {
       background: 'linear-gradient(160deg, #0d1b2a 0%, #0d2137 60%, #071a14 100%)',
       fontFamily: 'inherit', userSelect: 'none',
     }}>
-      {/* Audio element for remote voice — always present, never muted by default */}
       <audio ref={remoteAudioRef} autoPlay playsInline style={{ display: 'none' }} />
 
-      {/* Remote video — full screen, muted (audio handled by audio element above) */}
       <video ref={remoteVideoRef} autoPlay playsInline muted
         style={{
           position: 'absolute', inset: 0, width: '100%', height: '100%',
@@ -407,7 +577,6 @@ export default function CallScreen() {
         }}
       />
 
-      {/* Overlay gradient */}
       <div style={{
         position: 'absolute', inset: 0, pointerEvents: 'none',
         background: 'linear-gradient(to bottom, rgba(0,0,0,0.55) 0%, transparent 28%, transparent 62%, rgba(0,0,0,0.7) 100%)',
@@ -422,28 +591,20 @@ export default function CallScreen() {
         <TopBtn onClick={() => setIsMinimized(true)} title="Minimize">
           <Minimize2 size={18} color="#fff" />
         </TopBtn>
-
         <div style={{ textAlign: 'center' }}>
-          <div style={{ fontSize: 17, fontWeight: 700, color: '#fff', letterSpacing: '-0.2px' }}>
-            {peerName}
-          </div>
+          <div style={{ fontSize: 17, fontWeight: 700, color: '#fff', letterSpacing: '-0.2px' }}>{peerName}</div>
           <div style={{
             fontSize: 13, fontWeight: 500, marginTop: 2,
             color: isAnswered ? '#00e5b0' : 'rgba(255,255,255,0.6)',
-          }}>
-            {statusLabel}
-          </div>
+          }}>{statusLabel}</div>
           {isScreenSharing && (
             <div style={{ fontSize: 11, color: '#60d9b0', marginTop: 2 }}>● Sharing screen</div>
           )}
         </div>
-
-        <TopBtn title="Add participant">
-          <UserPlus size={18} color="#fff" />
-        </TopBtn>
+        <TopBtn title="Add participant"><UserPlus size={18} color="#fff" /></TopBtn>
       </div>
 
-      {/* ── CENTER AVATAR (voice calls always; video calls while waiting) ── */}
+      {/* ── CENTER AVATAR ── */}
       {(!isVideo || !isAnswered) && (
         <div style={{
           position: 'absolute', inset: 0, display: 'flex', flexDirection: 'column',
@@ -452,41 +613,28 @@ export default function CallScreen() {
           <div style={{ position: 'relative', marginBottom: 24 }}>
             {isCalling && (
               <>
-                <div style={{
-                  position: 'absolute', inset: -20, borderRadius: '50%',
-                  border: '2px solid rgba(0,168,132,0.25)',
-                  animation: 'callPulse 2s ease-out infinite',
-                }} />
-                <div style={{
-                  position: 'absolute', inset: -40, borderRadius: '50%',
-                  border: '2px solid rgba(0,168,132,0.12)',
-                  animation: 'callPulse 2s ease-out infinite 0.5s',
-                }} />
+                <div style={{ position: 'absolute', inset: -20, borderRadius: '50%', border: '2px solid rgba(0,168,132,0.25)', animation: 'callPulse 2s ease-out infinite' }} />
+                <div style={{ position: 'absolute', inset: -40, borderRadius: '50%', border: '2px solid rgba(0,168,132,0.12)', animation: 'callPulse 2s ease-out infinite 0.5s' }} />
               </>
             )}
-            <div style={{
-              width: 100, height: 100, borderRadius: '50%', overflow: 'hidden',
-              boxShadow: '0 0 0 4px rgba(0,168,132,0.3), 0 8px 32px rgba(0,0,0,0.4)',
-            }}>
+            <div style={{ width: 100, height: 100, borderRadius: '50%', overflow: 'hidden', boxShadow: '0 0 0 4px rgba(0,168,132,0.3), 0 8px 32px rgba(0,0,0,0.4)' }}>
               <Avatar src={activeCall.peerInfo?.avatar_url} name={peerName} size="xl" />
             </div>
           </div>
         </div>
       )}
 
-      {/* ── LOCAL VIDEO PiP (video calls only) ── */}
+      {/* ── LOCAL VIDEO PiP ── */}
       {isVideo && (
         <div style={{
           position: 'absolute', bottom: 110, right: 12,
           width: 110, height: 150, borderRadius: 16, overflow: 'hidden',
-          boxShadow: '0 6px 28px rgba(0,0,0,0.5)',
-          border: '2px solid rgba(255,255,255,0.12)',
+          boxShadow: '0 6px 28px rgba(0,0,0,0.5)', border: '2px solid rgba(255,255,255,0.12)',
         }}>
           <video ref={localVideoRef} autoPlay playsInline muted
             style={{ width: '100%', height: '100%', objectFit: 'cover', transform: 'scaleX(-1)' }} />
           <button onClick={flipCamera} style={{
-            position: 'absolute', top: 6, right: 6,
-            width: 28, height: 28, borderRadius: '50%',
+            position: 'absolute', top: 6, right: 6, width: 28, height: 28, borderRadius: '50%',
             background: 'rgba(0,0,0,0.5)', border: 'none', cursor: 'pointer',
             display: 'flex', alignItems: 'center', justifyContent: 'center',
           }} title="Flip camera">
@@ -498,26 +646,22 @@ export default function CallScreen() {
       {/* ── BOTTOM CONTROL BAR ── */}
       <div style={{
         position: 'absolute', bottom: 0, left: 0, right: 0,
-        padding: '18px 20px 40px',
-        background: 'rgba(0,0,0,0.6)',
-        backdropFilter: 'blur(20px)',
-        borderTop: '1px solid rgba(255,255,255,0.06)',
+        padding: '18px 20px 40px', background: 'rgba(0,0,0,0.6)',
+        backdropFilter: 'blur(20px)', borderTop: '1px solid rgba(255,255,255,0.06)',
       }}>
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-evenly' }}>
 
           {/* ⋯ More options */}
           <div style={{ position: 'relative' }}>
-            <CtrlBtn onClick={() => setShowMoreMenu((v) => !v)} active={showMoreMenu}>
+            <CtrlBtn onClick={() => setShowMoreMenu(v => !v)} active={showMoreMenu}>
               <MoreHorizontal size={22} color="#fff" />
             </CtrlBtn>
             {showMoreMenu && (
               <div ref={moreMenuRef} style={{
                 position: 'absolute', bottom: 64, left: '50%', transform: 'translateX(-50%)',
                 background: 'rgba(24,24,24,0.97)', borderRadius: 14,
-                boxShadow: '0 8px 32px rgba(0,0,0,0.6)',
-                border: '1px solid rgba(255,255,255,0.1)',
-                minWidth: 180, overflow: 'hidden',
-                animation: 'ctxMenuIn 0.12s ease-out',
+                boxShadow: '0 8px 32px rgba(0,0,0,0.6)', border: '1px solid rgba(255,255,255,0.1)',
+                minWidth: 180, overflow: 'hidden', animation: 'ctxMenuIn 0.12s ease-out',
               }}>
                 {isVideo && (
                   <MoreMenuItem
@@ -538,9 +682,7 @@ export default function CallScreen() {
           {/* Camera (video) or Speaker (audio) */}
           {isVideo ? (
             <CtrlBtn onClick={toggleCamera} active={!activeCall.isCameraOn}>
-              {activeCall.isCameraOn
-                ? <Video size={22} color="#fff" />
-                : <VideoOff size={22} color="#fff" />}
+              {activeCall.isCameraOn ? <Video size={22} color="#fff" /> : <VideoOff size={22} color="#fff" />}
             </CtrlBtn>
           ) : (
             <CtrlBtn onClick={toggleSpeaker} active={!speaker}>
@@ -548,22 +690,15 @@ export default function CallScreen() {
             </CtrlBtn>
           )}
 
-          {/* End call — red, center */}
+          {/* End call */}
           <button onClick={handleHangup} style={{
             width: 62, height: 62, borderRadius: '50%',
             background: '#e53935', border: 'none', cursor: 'pointer',
             display: 'flex', alignItems: 'center', justifyContent: 'center',
-            boxShadow: '0 4px 20px rgba(229,57,53,0.55)',
-            transition: 'transform 0.12s, box-shadow 0.12s',
+            boxShadow: '0 4px 20px rgba(229,57,53,0.55)', transition: 'transform 0.12s, box-shadow 0.12s',
           }}
-            onMouseEnter={(e) => {
-              e.currentTarget.style.transform = 'scale(1.08)';
-              e.currentTarget.style.boxShadow = '0 6px 28px rgba(229,57,53,0.75)';
-            }}
-            onMouseLeave={(e) => {
-              e.currentTarget.style.transform = 'scale(1)';
-              e.currentTarget.style.boxShadow = '0 4px 20px rgba(229,57,53,0.55)';
-            }}
+            onMouseEnter={e => { e.currentTarget.style.transform = 'scale(1.08)'; e.currentTarget.style.boxShadow = '0 6px 28px rgba(229,57,53,0.75)'; }}
+            onMouseLeave={e => { e.currentTarget.style.transform = 'scale(1)'; e.currentTarget.style.boxShadow = '0 4px 20px rgba(229,57,53,0.55)'; }}
           >
             <PhoneOff size={24} color="#fff" />
           </button>
@@ -573,7 +708,7 @@ export default function CallScreen() {
             {activeCall.isMuted ? <MicOff size={22} color="#fff" /> : <Mic size={22} color="#fff" />}
           </CtrlBtn>
 
-          {/* Speaker (video calls only — separate from camera toggle) */}
+          {/* Speaker (video calls only) */}
           {isVideo && (
             <CtrlBtn onClick={toggleSpeaker} active={!speaker}>
               {speaker ? <Volume2 size={22} color="#fff" /> : <VolumeX size={22} color="#fff" />}
@@ -584,23 +719,22 @@ export default function CallScreen() {
 
       <style>{`
         @keyframes callPulse {
-          0%   { transform: scale(1); opacity: 1; }
+          0%   { transform: scale(1);   opacity: 1; }
           100% { transform: scale(1.6); opacity: 0; }
         }
         @keyframes ctxMenuIn {
           from { opacity: 0; transform: translateX(-50%) scale(0.94) translateY(6px); }
-          to   { opacity: 1; transform: translateX(-50%) scale(1) translateY(0); }
+          to   { opacity: 1; transform: translateX(-50%) scale(1)    translateY(0);   }
         }
       `}</style>
     </div>
   );
 }
 
-function TopBtn({ children, onClick, title }: {
-  children: React.ReactNode;
-  onClick?: () => void;
-  title?: string;
-}) {
+/* ─────────────────────────────────────────────────────
+ * Sub-components
+ * ───────────────────────────────────────────────────── */
+function TopBtn({ children, onClick, title }: { children: React.ReactNode; onClick?: () => void; title?: string }) {
   return (
     <button onClick={onClick} title={title} style={{
       width: 40, height: 40, borderRadius: '50%',
@@ -609,19 +743,15 @@ function TopBtn({ children, onClick, title }: {
       display: 'flex', alignItems: 'center', justifyContent: 'center',
       backdropFilter: 'blur(8px)', transition: 'background 0.15s',
     }}
-      onMouseEnter={(e) => (e.currentTarget.style.background = 'rgba(255,255,255,0.15)')}
-      onMouseLeave={(e) => (e.currentTarget.style.background = 'rgba(0,0,0,0.35)')}
+      onMouseEnter={e => (e.currentTarget.style.background = 'rgba(255,255,255,0.15)')}
+      onMouseLeave={e => (e.currentTarget.style.background = 'rgba(0,0,0,0.35)')}
     >
       {children}
     </button>
   );
 }
 
-function CtrlBtn({ children, onClick, active }: {
-  children: React.ReactNode;
-  onClick: () => void;
-  active?: boolean;
-}) {
+function CtrlBtn({ children, onClick, active }: { children: React.ReactNode; onClick: () => void; active?: boolean }) {
   return (
     <button onClick={onClick} style={{
       width: 52, height: 52, borderRadius: '50%',
@@ -630,8 +760,8 @@ function CtrlBtn({ children, onClick, active }: {
       cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center',
       backdropFilter: 'blur(8px)', transition: 'background 0.15s',
     }}
-      onMouseEnter={(e) => (e.currentTarget.style.background = 'rgba(255,255,255,0.22)')}
-      onMouseLeave={(e) => (e.currentTarget.style.background = active ? 'rgba(255,255,255,0.28)' : 'rgba(255,255,255,0.12)')}
+      onMouseEnter={e => (e.currentTarget.style.background = 'rgba(255,255,255,0.22)')}
+      onMouseLeave={e => (e.currentTarget.style.background = active ? 'rgba(255,255,255,0.28)' : 'rgba(255,255,255,0.12)')}
     >
       {children}
     </button>
@@ -641,10 +771,7 @@ function CtrlBtn({ children, onClick, active }: {
 function MoreMenuItem({ icon, label, onClick }: { icon: React.ReactNode; label: string; onClick: () => void }) {
   const [hov, setHov] = useState(false);
   return (
-    <button
-      onClick={onClick}
-      onMouseEnter={() => setHov(true)}
-      onMouseLeave={() => setHov(false)}
+    <button onClick={onClick} onMouseEnter={() => setHov(true)} onMouseLeave={() => setHov(false)}
       style={{
         display: 'flex', alignItems: 'center', gap: 10, width: '100%',
         padding: '12px 16px', border: 'none', cursor: 'pointer',

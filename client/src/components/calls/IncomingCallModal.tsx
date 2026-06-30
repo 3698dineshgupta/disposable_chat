@@ -28,12 +28,13 @@ export default function IncomingCallModal() {
     audioRef.current?.pause();
     startCall({
       callId,
-      peerId:        callerId,
-      peerInfo:      callerInfo,
+      peerId:         callerId,
+      peerInfo:       callerInfo,
       type,
-      status:        'answered',
-      incomingOffer: incomingCall.offer,
-      isInitiator:   false,
+      status:         'answered',
+      conversationId: incomingCall.conversationId,  // forward so call:end includes it
+      incomingOffer:  incomingCall.offer,
+      isInitiator:    false,
     });
     setIncomingCall(null);
   };

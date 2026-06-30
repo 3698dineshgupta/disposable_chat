@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useCallback } from 'react';
 import { type Socket } from 'socket.io-client';
-import { connectSocket, getSocket } from '@/lib/socket';
+import { connectSocket, getSocket, disconnectSocket } from '@/lib/socket';
 import { messageBus } from '@/lib/messageBus';
 import { updateMessageStatus, clearAllUserData } from '@/lib/db/index';
 import { useAuthStore } from '@/store/auth';
@@ -12,12 +12,15 @@ import { useUIStore } from '@/store/ui';
 import type { IncomingMessage, IncomingCall } from '@/types';
 import toast from 'react-hot-toast';
 
+const log = (...args: unknown[]) => console.log('[SOCKET-CLIENT]', ...args);
+
 export function useSocketSetup() {
   const { accessToken, isAuthenticated } = useAuthStore();
-  const { setUserOnline, setUserOffline, setTyping, addMessage, updateMessage } = useChatStore();
+  const { setUserOnline, setUserOffline, setTyping, addMessage, updateMessage, setConversations } = useChatStore();
   const { setIncomingCall } = useCallStore();
   const socketRef = useRef<Socket | null>(null);
-  // Deduplicates messages that arrive on both the conv room and user room
+
+  // Deduplicates messages that arrive on BOTH the conv room AND user room simultaneously
   const receivedIdsRef = useRef<Set<string>>(new Set());
 
   useEffect(() => {
@@ -26,25 +29,40 @@ export function useSocketSetup() {
     const socket = connectSocket(accessToken);
     socketRef.current = socket;
 
+    log('setting up event handlers, socketId=', socket.id);
+
     /* ── Presence ── */
-    socket.on('user:online', ({ userId }: { userId: string }) => setUserOnline(userId));
-    socket.on('user:offline', ({ userId }: { userId: string }) => setUserOffline(userId));
+    const onUserOnline = ({ userId }: { userId: string }) => {
+      log(`user:online ${userId}`);
+      setUserOnline(userId);
+    };
+    const onUserOffline = ({ userId }: { userId: string }) => {
+      log(`user:offline ${userId}`);
+      setUserOffline(userId);
+    };
+    socket.on('user:online',  onUserOnline);
+    socket.on('user:offline', onUserOffline);
 
     /* ── Typing ── */
-    socket.on('typing:start', ({ userId, conversationId }: { userId: string; conversationId: string }) =>
-      setTyping(conversationId, userId, true)
-    );
-    socket.on('typing:stop', ({ userId, conversationId }: { userId: string; conversationId: string }) =>
-      setTyping(conversationId, userId, false)
-    );
+    const onTypingStart = ({ userId, conversationId }: { userId: string; conversationId: string }) =>
+      setTyping(conversationId, userId, true);
+    const onTypingStop  = ({ userId, conversationId }: { userId: string; conversationId: string }) =>
+      setTyping(conversationId, userId, false);
+    socket.on('typing:start', onTypingStart);
+    socket.on('typing:stop',  onTypingStop);
 
-    /* ── Messages ── */
+    /* ── Message receive ── */
     const onMessageReceive = (data: IncomingMessage) => {
+      log(`message:receive conv=${data.conversationId} from=${data.senderId} localId=${data.localId}`);
+
       // Deduplicate: same message may arrive via conv room AND user room
       if (data.localId) {
-        if (receivedIdsRef.current.has(data.localId)) return;
+        if (receivedIdsRef.current.has(data.localId)) {
+          log(`dedup skip localId=${data.localId}`);
+          return;
+        }
         receivedIdsRef.current.add(data.localId);
-        // Cap set size to avoid memory growth
+        // Prune old IDs to avoid unbounded memory growth
         if (receivedIdsRef.current.size > 500) {
           const iter = receivedIdsRef.current.values();
           for (let i = 0; i < 100; i++) {
@@ -57,126 +75,151 @@ export function useSocketSetup() {
 
       messageBus.emit(data);
       useChatStore.getState().queueIncoming([{
-        conversationId: data.conversationId,
-        senderId: data.senderId,
+        conversationId:   data.conversationId,
+        senderId:         data.senderId,
         encryptedPayload: data.encryptedPayload,
-        messageType: data.messageType,
-        localId: data.localId,
-        timestamp: data.timestamp,
+        messageType:      data.messageType,
+        localId:          data.localId,
+        timestamp:        data.timestamp,
       }]);
 
-      // Increment unread count if this conversation isn't currently open
+      // Increment unread for non-active conversations
       const { activeConversationId } = useUIStore.getState();
       if (data.conversationId !== activeConversationId) {
         const { conversations, updateConversation } = useChatStore.getState();
-        const conv = conversations.find((c) => c.id === data.conversationId);
+        const conv = conversations.find(c => c.id === data.conversationId);
         updateConversation(data.conversationId, {
           unreadCount: (conv?.unreadCount ?? 0) + 1,
-          updated_at: data.timestamp,
+          updated_at:  data.timestamp,
         });
       }
     };
     socket.on('message:receive', onMessageReceive);
 
-    /* Queue pending messages (offline delivery) */
-    socket.on('messages:pending', ({ messages }: { messages: any[] }) => {
-      const shaped: RawIncoming[] = messages.map((m) => ({
-        conversationId: m.conversation_id,
-        senderId: m.sender_id,
-        encryptedPayload: m.encrypted_payload,
-        messageType: m.message_type,
-        localId: m.local_id,
-        timestamp: m.created_at,
-        pendingDbId: m.id,
+    /* ── Pending messages (offline delivery) ── */
+    const onMessagesPending = ({ messages }: { messages: unknown[] }) => {
+      log(`messages:pending count=${messages.length}`);
+      const shaped: RawIncoming[] = (messages as Array<Record<string, unknown>>).map((m) => ({
+        conversationId:   m.conversation_id as string,
+        senderId:         m.sender_id as string,
+        encryptedPayload: m.encrypted_payload as never,
+        messageType:      m.message_type as string,
+        localId:          m.local_id as string | undefined,
+        timestamp:        m.created_at as string,
+        pendingDbId:      m.id as string | undefined,
       }));
       useChatStore.getState().queueIncoming(shaped);
 
-      // Build per-conversation unread counts (skip the currently open conversation)
       const { activeConversationId } = useUIStore.getState();
       const perConv: Record<string, number> = {};
-      for (const m of messages) {
+      for (const m of messages as Array<Record<string, unknown>>) {
         if (m.conversation_id !== activeConversationId) {
-          perConv[m.conversation_id] = (perConv[m.conversation_id] ?? 0) + 1;
+          perConv[m.conversation_id as string] = (perConv[m.conversation_id as string] ?? 0) + 1;
         }
       }
       if (Object.keys(perConv).length > 0) {
-        // addPendingUnreads handles both cases:
-        //   - conversations already loaded → updated immediately
-        //   - conversations not yet loaded → stored and merged when setConversations fires
         useChatStore.getState().addPendingUnreads(perConv);
       }
-    });
+    };
+    socket.on('messages:pending', onMessagesPending);
 
-    socket.on('message:delivered', ({ localId }: { localId: string }) => {
+    /* ── Delivery / seen receipts ── */
+    const onMessageDelivered = ({ localId }: { localId: string }) => {
+      log(`message:delivered localId=${localId}`);
       updateMessage(localId, { status: 'delivered' });
       updateMessageStatus(localId, 'delivered');
-    });
+    };
+    socket.on('message:delivered', onMessageDelivered);
 
-    socket.on('message:seen', ({ localIds, conversationId: cid }: { localIds: string[]; conversationId?: string }) => {
-      localIds.forEach((id) => {
+    const onMessageSeen = ({ localIds, conversationId: cid }: { localIds: string[]; conversationId?: string }) => {
+      log(`message:seen ${localIds.length} ids in conv=${cid}`);
+      localIds.forEach(id => {
         updateMessage(id, { status: 'seen' });
         updateMessageStatus(id, 'seen');
       });
       if (cid) {
         const { conversations, updateConversation } = useChatStore.getState();
-        const conv = conversations.find((c) => c.id === cid);
+        const conv = conversations.find(c => c.id === cid);
         if (conv?.lastMessage && localIds.includes(conv.lastMessage.localId)) {
           updateConversation(cid, { lastMessage: { ...conv.lastMessage, status: 'seen' } });
         }
       }
-    });
+    };
+    socket.on('message:seen', onMessageSeen);
 
-    socket.on('message:react', ({ localId, userId, emoji }: { localId: string; userId: string; emoji: string }) => {
+    const onMessageReact = ({ localId, userId, emoji }: { localId: string; userId: string; emoji: string }) => {
       useChatStore.getState().addReaction(localId, userId, emoji);
-    });
+    };
+    socket.on('message:react', onMessageReact);
 
     /* ── Calls ── */
-    socket.on('call:incoming', (call: IncomingCall) => setIncomingCall(call));
-    socket.on('call:ended', () => useCallStore.getState().endCall());
-    socket.on('call:rejected', () => useCallStore.getState().endCall());
+    const onCallIncoming = (call: IncomingCall) => {
+      log(`call:incoming callId=${call.callId} from=${call.callerId} type=${call.type}`);
+      setIncomingCall(call);
+    };
+    socket.on('call:incoming', onCallIncoming);
+
+    const onCallEnded = ({ callId }: { callId: string }) => {
+      log(`call:ended callId=${callId}`);
+      useCallStore.getState().endCall();
+    };
+    socket.on('call:ended', onCallEnded);
+
+    const onCallRejected = ({ callId }: { callId: string }) => {
+      log(`call:rejected callId=${callId}`);
+      toast('Call declined', { icon: '📵' });
+      useCallStore.getState().endCall();
+    };
+    socket.on('call:rejected', onCallRejected);
 
     /* ── Single-device enforcement ── */
-    socket.on('session:replaced', () => {
+    const onSessionReplaced = () => {
+      log('session:replaced — logging out');
       clearAllUserData().catch(() => {});
       localStorage.removeItem('zapchat-active-user');
-      useChatStore.getState().setConversations([]);
+      setConversations([]);
       useAuthStore.getState().logout();
+      // Also disconnect the socket cleanly
+      disconnectSocket();
       toast.error('Signed in from another device. You have been logged out.', { duration: 5000 });
-    });
+    };
+    socket.on('session:replaced', onSessionReplaced);
 
-    /* Re-join all known conversation rooms after reconnect */
+    /* ── Re-join conversation rooms after reconnect ── */
     const onConnect = () => {
-      const { conversations } = useChatStore.getState?.() ?? {};
-      (conversations ?? []).forEach((c: { id: string }) => {
+      log('socket (re)connected, re-joining conversation rooms');
+      const { conversations } = useChatStore.getState();
+      conversations.forEach((c: { id: string }) => {
         socket.emit('conversation:join', { conversationId: c.id });
       });
     };
     socket.on('connect', onConnect);
 
     return () => {
-      socket.off('user:online');
-      socket.off('user:offline');
-      socket.off('typing:start');
-      socket.off('typing:stop');
-      socket.off('message:receive', onMessageReceive);
-      socket.off('messages:pending');
-      socket.off('message:delivered');
-      socket.off('message:seen');
-      socket.off('message:react');
-      socket.off('call:incoming');
-      socket.off('call:ended');
-      socket.off('call:rejected');
-      socket.off('session:replaced');
-      socket.off('connect', onConnect);
+      log('cleaning up socket event handlers');
+      socket.off('user:online',       onUserOnline);
+      socket.off('user:offline',      onUserOffline);
+      socket.off('typing:start',      onTypingStart);
+      socket.off('typing:stop',       onTypingStop);
+      socket.off('message:receive',   onMessageReceive);
+      socket.off('messages:pending',  onMessagesPending);
+      socket.off('message:delivered', onMessageDelivered);
+      socket.off('message:seen',      onMessageSeen);
+      socket.off('message:react',     onMessageReact);
+      socket.off('call:incoming',     onCallIncoming);
+      socket.off('call:ended',        onCallEnded);
+      socket.off('call:rejected',     onCallRejected);
+      socket.off('session:replaced',  onSessionReplaced);
+      socket.off('connect',           onConnect);
     };
-  }, [accessToken, isAuthenticated]);
+  }, [accessToken, isAuthenticated]); // eslint-disable-line react-hooks/exhaustive-deps
 
   return socketRef.current;
 }
 
 export function useTyping(conversationId: string) {
   const typingTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const isTypingRef = useRef(false);
+  const isTypingRef      = useRef(false);
 
   const startTyping = useCallback(() => {
     const socket = getSocket();

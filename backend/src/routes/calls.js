@@ -4,6 +4,39 @@ const { authenticate } = require('../middleware/auth');
 
 const router = express.Router();
 
+/* ── ICE server credentials for WebRTC ── */
+router.get('/ice-servers', authenticate, (req, res) => {
+  const servers = [
+    { urls: 'stun:stun.l.google.com:19302' },
+    { urls: 'stun:stun1.l.google.com:19302' },
+    { urls: 'stun:stun2.l.google.com:19302' },
+    { urls: 'stun:stun3.l.google.com:19302' },
+  ];
+
+  // Add TURN server(s) if configured via environment variables.
+  // Set TURN_URLS (comma-separated), TURN_USERNAME, TURN_CREDENTIAL in backend .env
+  if (process.env.TURN_URLS) {
+    const urls = process.env.TURN_URLS.split(',').map(u => u.trim()).filter(Boolean);
+    servers.push({
+      urls,
+      username:   process.env.TURN_USERNAME   || '',
+      credential: process.env.TURN_CREDENTIAL || '',
+    });
+  }
+
+  // Metered.ca free TURN (set METERED_API_KEY env var to enable)
+  if (process.env.METERED_API_KEY) {
+    servers.push(
+      { urls: `turn:a.relay.metered.ca:80`,     username: process.env.METERED_USERNAME || '', credential: process.env.METERED_CREDENTIAL || '' },
+      { urls: `turn:a.relay.metered.ca:80?transport=tcp`, username: process.env.METERED_USERNAME || '', credential: process.env.METERED_CREDENTIAL || '' },
+      { urls: `turn:a.relay.metered.ca:443`,    username: process.env.METERED_USERNAME || '', credential: process.env.METERED_CREDENTIAL || '' },
+      { urls: `turns:a.relay.metered.ca:443?transport=tcp`, username: process.env.METERED_USERNAME || '', credential: process.env.METERED_CREDENTIAL || '' },
+    );
+  }
+
+  res.json({ iceServers: servers });
+});
+
 /* ── Get call history ── */
 router.get('/', authenticate, async (req, res) => {
   try {

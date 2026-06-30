@@ -143,6 +143,9 @@ export const callsApi = {
     api.post('/calls', data),
   updateCall: (id: string, data: object) =>
     api.put(`/calls/${id}`, data),
+  /** Fetch ICE server configs (STUN + optional TURN) from backend */
+  iceServers: () =>
+    api.get<{ iceServers: RTCIceServer[] }>('/calls/ice-servers'),
 };
 
 /* ── AI Auto-Reply ── */
