@@ -155,8 +155,19 @@ router.post('/upload', authenticate, upload.single('file'), async (req, res) => 
       return res.status(500).json({ error: `Storage upload failed: ${upErr.message}` });
     }
 
-    const { data: pub } = supabase.storage.from('media').getPublicUrl(storagePath);
-    res.json({ url: pub.publicUrl, storagePath, name: req.file.originalname, size: req.file.size, type: req.file.mimetype });
+    // Prefer a signed URL (works even when bucket is private).
+    // 10-year expiry is effectively permanent for a chat attachment.
+    const TEN_YEARS = 60 * 60 * 24 * 365 * 10;
+    const { data: signed, error: signErr } = await supabase.storage
+      .from('media')
+      .createSignedUrl(storagePath, TEN_YEARS);
+
+    const url = signed?.signedUrl
+      ?? supabase.storage.from('media').getPublicUrl(storagePath).data.publicUrl;
+
+    if (signErr) console.warn('[upload] signed URL warn (falling back to public URL):', signErr.message);
+
+    res.json({ url, storagePath, name: req.file.originalname, size: req.file.size, type: req.file.mimetype });
   } catch (err) {
     console.error('[upload] unexpected error:', err?.message ?? err);
     res.status(500).json({ error: 'Upload failed' });
