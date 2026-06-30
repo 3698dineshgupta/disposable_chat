@@ -43,8 +43,8 @@ export function useMessages(conversation: Conversation | null, cryptoCtx: Crypto
     const msgs = useChatStore.getState().messages[conversationId] ?? [];
     const unseen = msgs.filter((m) => !m.isMine && m.status !== 'seen');
     if (unseen.length === 0) {
-      // Still reset unread badge even if all are already marked
       useChatStore.getState().updateConversation(conversationId, { unreadCount: 0 });
+      useChatStore.getState().clearPendingUnread(conversationId);
       return;
     }
     const socket = getSocket();
@@ -67,6 +67,7 @@ export function useMessages(conversation: Conversation | null, cryptoCtx: Crypto
       unreadCount: 0,
       last_read_at: new Date().toISOString(),
     });
+    useChatStore.getState().clearPendingUnread(conversationId);
   }, [conversationId, user, updateMessage]);
 
   /* ── Load messages from IndexedDB ── */

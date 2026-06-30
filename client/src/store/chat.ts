@@ -23,12 +23,15 @@ interface ChatState {
   replyingTo: Record<string, LocalMessage | null>; // conversationId → msg
   searchText: Record<string, string>;
   rawIncoming: Record<string, RawIncoming[]>; // conversationId → unprocessed encrypted messages
+  pendingUnreads: Record<string, number>; // unread counts received before conversations loaded
 
   /* Conversation actions */
   setConversations: (convs: Conversation[]) => void;
   addConversation: (conv: Conversation) => void;
   updateConversation: (id: string, partial: Partial<Conversation>) => void;
   removeConversation: (id: string) => void;
+  addPendingUnreads: (counts: Record<string, number>) => void;
+  clearPendingUnread: (convId: string) => void;
 
   /* Message actions */
   setMessages: (conversationId: string, msgs: LocalMessage[]) => void;
@@ -65,8 +68,17 @@ export const useChatStore = create<ChatState>()((set, get) => ({
   replyingTo: {},
   rawIncoming: {},
   searchText: {},
+  pendingUnreads: {},
 
-  setConversations: (convs) => set({ conversations: convs }),
+  // Merge any stored pending unread counts into the incoming conversations
+  setConversations: (convs) =>
+    set((s) => ({
+      conversations: convs.map((c) =>
+        s.pendingUnreads[c.id]
+          ? { ...c, unreadCount: (c.unreadCount ?? 0) + s.pendingUnreads[c.id] }
+          : c
+      ),
+    })),
   addConversation: (conv) =>
     set((s) => {
       const existing = s.conversations.find((c) => c.id === conv.id);
@@ -183,5 +195,29 @@ export const useChatStore = create<ChatState>()((set, get) => ({
       const next = { ...s.rawIncoming };
       delete next[cid];
       return { rawIncoming: next };
+    }),
+
+  // Called by the socket handler when pending messages arrive before conversations load.
+  // Immediately updates conversations that are already in the store, AND stores counts
+  // for conversations that haven't loaded yet (merged in setConversations).
+  addPendingUnreads: (counts) =>
+    set((s) => {
+      const nextPending = { ...s.pendingUnreads };
+      for (const [id, count] of Object.entries(counts)) {
+        nextPending[id] = (nextPending[id] ?? 0) + count;
+      }
+      // Also immediately update any conversations already in the store
+      const conversations = s.conversations.map((c) =>
+        counts[c.id] !== undefined
+          ? { ...c, unreadCount: (c.unreadCount ?? 0) + counts[c.id] }
+          : c
+      );
+      return { pendingUnreads: nextPending, conversations };
+    }),
+
+  clearPendingUnread: (convId) =>
+    set((s) => {
+      const { [convId]: _, ...rest } = s.pendingUnreads;
+      return { pendingUnreads: rest };
     }),
 }));

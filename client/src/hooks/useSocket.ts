@@ -73,7 +73,7 @@ export function useSocketSetup() {
       }));
       useChatStore.getState().queueIncoming(shaped);
 
-      // Increment unread counts per conversation for background messages
+      // Build per-conversation unread counts (skip the currently open conversation)
       const { activeConversationId } = useUIStore.getState();
       const perConv: Record<string, number> = {};
       for (const m of messages) {
@@ -81,10 +81,11 @@ export function useSocketSetup() {
           perConv[m.conversation_id] = (perConv[m.conversation_id] ?? 0) + 1;
         }
       }
-      const { conversations, updateConversation } = useChatStore.getState();
-      for (const [convId, count] of Object.entries(perConv)) {
-        const conv = conversations.find((c) => c.id === convId);
-        updateConversation(convId, { unreadCount: (conv?.unreadCount ?? 0) + count });
+      if (Object.keys(perConv).length > 0) {
+        // addPendingUnreads handles both cases:
+        //   - conversations already loaded → updated immediately
+        //   - conversations not yet loaded → stored and merged when setConversations fires
+        useChatStore.getState().addPendingUnreads(perConv);
       }
     });
 
