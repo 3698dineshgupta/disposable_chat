@@ -17,6 +17,8 @@ export function useSocketSetup() {
   const { setUserOnline, setUserOffline, setTyping, addMessage, updateMessage } = useChatStore();
   const { setIncomingCall } = useCallStore();
   const socketRef = useRef<Socket | null>(null);
+  // Deduplicates messages that arrive on both the conv room and user room
+  const receivedIdsRef = useRef<Set<string>>(new Set());
 
   useEffect(() => {
     if (!isAuthenticated || !accessToken) return;
@@ -37,7 +39,22 @@ export function useSocketSetup() {
     );
 
     /* ── Messages ── */
-    socket.on('message:receive', (data: IncomingMessage) => {
+    const onMessageReceive = (data: IncomingMessage) => {
+      // Deduplicate: same message may arrive via conv room AND user room
+      if (data.localId) {
+        if (receivedIdsRef.current.has(data.localId)) return;
+        receivedIdsRef.current.add(data.localId);
+        // Cap set size to avoid memory growth
+        if (receivedIdsRef.current.size > 500) {
+          const iter = receivedIdsRef.current.values();
+          for (let i = 0; i < 100; i++) {
+            const { value, done } = iter.next();
+            if (done) break;
+            receivedIdsRef.current.delete(value);
+          }
+        }
+      }
+
       messageBus.emit(data);
       useChatStore.getState().queueIncoming([{
         conversationId: data.conversationId,
@@ -58,7 +75,8 @@ export function useSocketSetup() {
           updated_at: data.timestamp,
         });
       }
-    });
+    };
+    socket.on('message:receive', onMessageReceive);
 
     /* Queue pending messages (offline delivery) */
     socket.on('messages:pending', ({ messages }: { messages: any[] }) => {
@@ -124,19 +142,20 @@ export function useSocketSetup() {
     });
 
     /* Re-join all known conversation rooms after reconnect */
-    socket.on('connect', () => {
+    const onConnect = () => {
       const { conversations } = useChatStore.getState?.() ?? {};
       (conversations ?? []).forEach((c: { id: string }) => {
         socket.emit('conversation:join', { conversationId: c.id });
       });
-    });
+    };
+    socket.on('connect', onConnect);
 
     return () => {
       socket.off('user:online');
       socket.off('user:offline');
       socket.off('typing:start');
       socket.off('typing:stop');
-      socket.off('message:receive');
+      socket.off('message:receive', onMessageReceive);
       socket.off('messages:pending');
       socket.off('message:delivered');
       socket.off('message:seen');
@@ -145,6 +164,7 @@ export function useSocketSetup() {
       socket.off('call:ended');
       socket.off('call:rejected');
       socket.off('session:replaced');
+      socket.off('connect', onConnect);
     };
   }, [accessToken, isAuthenticated]);
 

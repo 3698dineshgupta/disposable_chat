@@ -77,17 +77,22 @@ module.exports = function handleMessaging(io, socket, onlineUsers) {
         messageType: messageType || 'text', localId, timestamp: new Date().toISOString(),
       };
 
+      // Broadcast to all sockets that have joined the conversation room.
       socket.to(`conv:${conversationId}`).emit('message:receive', messageEvent);
 
       const pendingBase = { conversation_id: conversationId, sender_id: socket.userId, encrypted_payload: encryptedPayload, message_type: messageType || 'text', local_id: localId };
 
       if (recipientId) {
-        const isOffline = !onlineUsers.has(recipientId);
-        if (isOffline) {
+        const isOnline = onlineUsers.has(recipientId);
+
+        // Also emit directly to recipient's personal room.
+        // This guarantees delivery even if they haven't joined the conv room yet
+        // (e.g. new conversation created while they're online, or slow reconnect).
+        // The client deduplicates by localId so duplicates are harmless.
+        if (isOnline) {
+          io.to(`user:${recipientId}`).emit('message:receive', messageEvent);
+        } else {
           await supabase.from('pending_messages').insert({ ...pendingBase, recipient_id: recipientId });
-        }
-        // Send push notification for offline recipients
-        if (isOffline) {
           notifyNewMessage({
             recipientId,
             senderName: socket.user?.display_name || 'Someone',
@@ -103,7 +108,10 @@ module.exports = function handleMessaging(io, socket, onlineUsers) {
           .neq('user_id', socket.userId);
 
         for (const m of members || []) {
-          if (!onlineUsers.has(m.user_id)) {
+          if (onlineUsers.has(m.user_id)) {
+            // Emit directly to each online member's personal room too
+            io.to(`user:${m.user_id}`).emit('message:receive', messageEvent);
+          } else {
             await supabase.from('pending_messages').insert({ ...pendingBase, recipient_id: m.user_id });
             notifyNewMessage({
               recipientId: m.user_id,

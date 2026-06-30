@@ -12,6 +12,7 @@ const cookieParser = require('cookie-parser');
 
 require('./src/config/database');
 const initSocket = require('./src/socket');
+const runAIMigration = require('./src/utils/runAIMigration');
 
 const authRoutes = require('./src/routes/auth');
 const usersRoutes = require('./src/routes/users');
@@ -27,9 +28,17 @@ const isProd = process.env.NODE_ENV === 'production';
 /* ── CORS origin checker ── */
 function isAllowedOrigin(origin) {
   if (!origin) return true; // server-to-server / health checks
+
+  // In development, allow all origins so any device on any network can connect.
+  if (!isProd) return true;
+
   const clientUrl = (process.env.CLIENT_URL || '').replace(/\/$/, '');
-  if (clientUrl && origin === clientUrl) return true;
-  if (!isProd && origin.includes('localhost')) return true;
+
+  // Not configured for production yet — be permissive
+  if (!clientUrl || clientUrl.includes('localhost')) return true;
+
+  if (origin === clientUrl) return true;
+
   // Allow Vercel preview deploys for the same project
   if (clientUrl.includes('vercel.app')) {
     const baseDomain = clientUrl.replace('https://', '').split('-')[0];
@@ -118,4 +127,6 @@ app.get('*', (req, res) => {
 const PORT = process.env.PORT || 10000;
 server.listen(PORT, '0.0.0.0', () => {
   console.log(`ZapChat backend running on port ${PORT} [${isProd ? 'production' : 'development'}]`);
+  // Create AI + push tables if they don't exist yet (idempotent, non-blocking)
+  runAIMigration().catch(() => {});
 });

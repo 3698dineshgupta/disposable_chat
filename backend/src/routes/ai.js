@@ -49,15 +49,19 @@ router.post('/generate', authenticate, aiGenerateLimiter, async (req, res) => {
     if (!member)
       return res.status(403).json({ error: 'Not a participant in this conversation' });
 
-    // Check AI is enabled for this conversation
-    const { data: aiSetting } = await supabase
-      .from('ai_conversation_settings')
-      .select('auto_reply_enabled')
-      .eq('user_id', req.user.id)
-      .eq('conversation_id', conversationId)
-      .single();
+    // Check AI is enabled for this conversation (table may not exist yet — treat as disabled)
+    let aiEnabled = false;
+    try {
+      const { data: aiSetting } = await supabase
+        .from('ai_conversation_settings')
+        .select('auto_reply_enabled')
+        .eq('user_id', req.user.id)
+        .eq('conversation_id', conversationId)
+        .single();
+      aiEnabled = aiSetting?.auto_reply_enabled ?? false;
+    } catch { /* table doesn't exist — treat as disabled */ }
 
-    if (!aiSetting?.auto_reply_enabled)
+    if (!aiEnabled)
       return res.status(403).json({ error: 'Auto reply is not enabled for this conversation' });
 
     // Load writing style profile
@@ -95,6 +99,27 @@ router.post('/generate', authenticate, aiGenerateLimiter, async (req, res) => {
   }
 });
 
+/* ── GET /api/ai/settings (ALL conversations, one request) ─────── */
+router.get('/settings', authenticate, async (req, res) => {
+  try {
+    const { data, error } = await supabase
+      .from('ai_conversation_settings')
+      .select('conversation_id, auto_reply_enabled')
+      .eq('user_id', req.user.id);
+
+    if (error) throw error;
+
+    const settings = {};
+    for (const row of data || []) {
+      settings[row.conversation_id] = row.auto_reply_enabled;
+    }
+    res.json({ settings });
+  } catch (err) {
+    // Table may not exist yet — return empty settings (graceful degradation)
+    res.json({ settings: {} });
+  }
+});
+
 /* ── GET /api/ai/settings/:convId ───────────────────────────────── */
 router.get('/settings/:convId', authenticate, async (req, res) => {
   try {
@@ -106,9 +131,8 @@ router.get('/settings/:convId', authenticate, async (req, res) => {
       .single();
 
     res.json({ auto_reply_enabled: data?.auto_reply_enabled ?? false });
-  } catch (err) {
-    console.error('[ai/settings get]', err.message);
-    res.status(500).json({ error: 'Failed to get AI settings' });
+  } catch {
+    res.json({ auto_reply_enabled: false });
   }
 });
 
@@ -140,7 +164,7 @@ router.put('/settings/:convId', authenticate, async (req, res) => {
     res.json({ success: true, auto_reply_enabled });
   } catch (err) {
     console.error('[ai/settings put]', err.message);
-    res.status(500).json({ error: 'Failed to update AI settings' });
+    res.status(503).json({ error: 'AI settings unavailable — database tables not yet created. Restart the server to trigger auto-migration.' });
   }
 });
 
@@ -158,29 +182,31 @@ router.get('/style', authenticate, async (req, res) => {
       message_count: data?.sample_message_count ?? 0,
       last_updated: data?.last_updated ?? null,
     });
-  } catch (err) {
-    res.status(500).json({ error: 'Failed to get style profile' });
+  } catch {
+    res.json({ profile: null, message_count: 0, last_updated: null });
   }
 });
 
 /* ── POST /api/ai/style ─────────────────────────────────────────── */
 router.post('/style', authenticate, async (req, res) => {
   try {
-    const { messages } = req.body; // array of plaintext strings (user's own messages)
+    const { messages } = req.body;
     if (!Array.isArray(messages) || messages.length < 5)
       return res.status(400).json({ error: 'Need at least 5 messages to analyze style' });
 
     const safeMessages = messages.slice(0, 200).map((m) => String(m || '').slice(0, 500));
     const profile = analyzeWritingStyle(safeMessages);
 
-    await supabase
-      .from('ai_writing_profiles')
-      .upsert({
-        user_id: req.user.id,
-        profile_data: profile,
-        sample_message_count: safeMessages.length,
-        last_updated: new Date().toISOString(),
-      }, { onConflict: 'user_id' });
+    try {
+      await supabase
+        .from('ai_writing_profiles')
+        .upsert({
+          user_id: req.user.id,
+          profile_data: profile,
+          sample_message_count: safeMessages.length,
+          last_updated: new Date().toISOString(),
+        }, { onConflict: 'user_id' });
+    } catch { /* table not yet created — return profile without persisting */ }
 
     res.json({ success: true, profile });
   } catch (err) {

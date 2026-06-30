@@ -155,7 +155,11 @@ export const aiApi = {
     conversationSummary?: string;
   }) => api.post('/ai/generate', data),
 
-  /** Get AI settings for a conversation */
+  /** Get AI settings for ALL conversations in a single request */
+  getAllSettings: () =>
+    api.get('/ai/settings'),
+
+  /** Get AI settings for a specific conversation */
   getSettings: (convId: string) =>
     api.get(`/ai/settings/${convId}`),
 

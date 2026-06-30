@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect } from 'react';
+import { useEffect, useRef } from 'react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { Toaster } from 'react-hot-toast';
 import { useUIStore } from '@/store/ui';
@@ -75,53 +75,40 @@ function AIManager() {
   return null;
 }
 
-/* Load AI settings for all conversations on startup + keep style profile fresh */
+/* Load AI settings (one-time on startup) and refresh writing style profile */
 function AIInitializer() {
   const { user } = useAuthStore();
   const { conversations } = useChatStore();
   const { bulkSetAutoReply, setStyleProfile, styleProfileLoaded } = useAIStore();
 
-  // Load per-conversation AI settings once conversations are available
+  // Load all AI settings in a SINGLE batch request — fires once on startup.
+  // Using a ref ensures this never re-fires on conversation list updates.
+  const settingsLoadedRef = useRef(false);
   useEffect(() => {
-    if (!user || !conversations.length) return;
-    const load = async () => {
-      try {
-        const results = await Promise.allSettled(
-          conversations.map((c) => aiApi.getSettings(c.id))
-        );
-        const settings: Record<string, boolean> = {};
-        results.forEach((r, i) => {
-          if (r.status === 'fulfilled') {
-            settings[conversations[i].id] = r.value.data.auto_reply_enabled ?? false;
-          }
-        });
-        bulkSetAutoReply(settings);
-      } catch { /* non-fatal */ }
-    };
-    load();
-  }, [user, conversations.length]); // eslint-disable-line react-hooks/exhaustive-deps
+    if (!user || settingsLoadedRef.current) return;
+    settingsLoadedRef.current = true;
+    aiApi.getAllSettings()
+      .then((res) => bulkSetAutoReply(res.data.settings ?? {}))
+      .catch(() => { /* AI tables may not exist yet — degrade silently */ });
+  }, [user]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Load and periodically refresh style profile
+  // Load style profile once per session
   useEffect(() => {
     if (!user || styleProfileLoaded) return;
-    const loadStyle = async () => {
-      try {
-        const res = await aiApi.getStyleProfile();
-        setStyleProfile(res.data.profile);
-      } catch { /* non-fatal */ }
-    };
-    loadStyle();
+    aiApi.getStyleProfile()
+      .then((res) => setStyleProfile(res.data.profile))
+      .catch(() => { /* non-fatal */ });
   }, [user, styleProfileLoaded]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Periodically refresh the writing style profile from recent sent messages
+  // Refresh writing style every 10 minutes (non-blocking, low priority)
   useEffect(() => {
     if (!user) return;
     const updateStyle = async () => {
       try {
-        // Collect user's own recent messages from all conversations
+        const convSnapshot = useChatStore.getState().conversations.slice(0, 8);
         const allMessages: string[] = [];
-        for (const conv of conversations.slice(0, 10)) {
-          const msgs = await getMessages(conv.id, 30);
+        for (const conv of convSnapshot) {
+          const msgs = await getMessages(conv.id, 25);
           const mine = msgs.filter((m) => m.senderId === user.id && m.text && m.type === 'text');
           allMessages.push(...mine.map((m) => m.text!));
         }
@@ -132,9 +119,8 @@ function AIInitializer() {
         }
       } catch { /* non-fatal */ }
     };
-
-    // Update style after 5s on startup, then every 10 minutes
-    const t = setTimeout(updateStyle, 5000);
+    // Delay initial run by 8s to not compete with startup traffic
+    const t = setTimeout(updateStyle, 8000);
     const interval = setInterval(updateStyle, 10 * 60 * 1000);
     return () => { clearTimeout(t); clearInterval(interval); };
   }, [user]); // eslint-disable-line react-hooks/exhaustive-deps

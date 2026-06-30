@@ -7,7 +7,7 @@ import { messageBus } from '@/lib/messageBus';
 import { useAuthStore } from '@/store/auth';
 import { useChatStore } from '@/store/chat';
 import {
-  saveMessage, getMessages, updateMessageStatus,
+  saveMessage, getMessages, updateMessageStatus, saveConversation,
   deleteMessageForMe, deleteMessageForEveryone,
   updateMessageReaction, enqueueMessage, getPendingQueue, dequeueMessage,
 } from '@/lib/db/index';
@@ -34,20 +34,43 @@ export function useMessages(conversation: Conversation | null, cryptoCtx: Crypto
   const [hasMore, setHasMore] = useState(true);
   const processingRef = useRef(new Set<string>());
   const conversationId = conversation?.id;
+  // Ref keeps conversation accessible inside callbacks without causing re-renders
+  const conversationRef = useRef(conversation);
+  conversationRef.current = conversation;
 
   const conversationMessages = conversationId ? (messages[conversationId] ?? []) : [];
 
   /* ── Mark all unread messages in this conversation as seen ── */
   const markAllSeenInConv = useCallback(async () => {
     if (!conversationId || !user) return;
+    const now = new Date().toISOString();
+    const socket = getSocket();
+
+    // Always stamp last_read_at in the store + IndexedDB immediately on open.
+    // This is the root fix for "old messages shown as unread on next load" —
+    // previously, when unseen === 0, we returned early without persisting the
+    // updated timestamp, so IndexedDB kept the stale time and getUnreadCount
+    // re-counted the same messages as unread on every page refresh.
+    useChatStore.getState().updateConversation(conversationId, { unreadCount: 0, last_read_at: now });
+    useChatStore.getState().clearPendingUnread(conversationId);
+
+    // Persist the updated last_read_at to IndexedDB so it survives refresh
+    const updatedConv = useChatStore.getState().conversations.find((c) => c.id === conversationId);
+    if (updatedConv) {
+      try { await saveConversation({ ...updatedConv, last_read_at: now, unreadCount: 0 }); } catch { /* non-fatal */ }
+    }
+
+    // Also update last_read_at in the server DB so other devices see the read state.
+    // Use conversationRef to avoid making this callback dependent on the conversation prop
+    // (which would cause an infinite re-render loop via updateConversation → storeConv change).
+    if (conversationRef.current?.other_user_id && socket?.connected) {
+      socket.emit('message:seen', { conversationId, localIds: [], senderId: conversationRef.current.other_user_id });
+    }
+
     const msgs = useChatStore.getState().messages[conversationId] ?? [];
     const unseen = msgs.filter((m) => !m.isMine && m.status !== 'seen');
-    if (unseen.length === 0) {
-      useChatStore.getState().updateConversation(conversationId, { unreadCount: 0 });
-      useChatStore.getState().clearPendingUnread(conversationId);
-      return;
-    }
-    const socket = getSocket();
+    if (unseen.length === 0) return;
+
     // Group by sender so we emit one event per sender
     const bySender: Record<string, string[]> = {};
     for (const m of unseen) {
@@ -57,18 +80,12 @@ export function useMessages(conversation: Conversation | null, cryptoCtx: Crypto
     for (const senderId of Object.keys(bySender)) {
       socket?.emit('message:seen', { conversationId, localIds: bySender[senderId], senderId });
     }
-    // Persist to IndexedDB and update store
+    // Persist seen status to IndexedDB and update store
     for (const m of unseen) {
       await updateMessageStatus(m.localId, 'seen');
       updateMessage(m.localId, { status: 'seen' });
     }
-    // Reset unread count and refresh last_read_at
-    useChatStore.getState().updateConversation(conversationId, {
-      unreadCount: 0,
-      last_read_at: new Date().toISOString(),
-    });
-    useChatStore.getState().clearPendingUnread(conversationId);
-  }, [conversationId, user, updateMessage]);
+  }, [conversationId, user, updateMessage]); // conversation intentionally omitted — accessed via conversationRef
 
   /* ── Load messages from IndexedDB ── */
   const loadMessages = useCallback(async (before?: string) => {

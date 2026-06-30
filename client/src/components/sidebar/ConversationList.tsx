@@ -46,12 +46,26 @@ export default function ConversationList() {
     queryFn: async () => {
       const res = await conversationsApi.list();
       const convs: Conversation[] = res.data.conversations;
+      // Use the best available "last read" timestamp to count unread messages.
+      // Priority: server's last_read_at → local store's last_read_at (updated by
+      // markAllSeenInConv) → conversation created_at → current time.
+      // Never fall back to epoch (new Date(0)) — that would mark all historical
+      // messages as unread for conversations where last_read_at is null.
+      const localStore = useChatStore.getState().conversations;
       const enriched = await Promise.all(
-        convs.map(async (c) => ({
-          ...c,
-          lastMessage:  await getLastMessage(c.id),
-          unreadCount:  await getUnreadCount(c.id, c.last_read_at || new Date(0).toISOString()),
-        }))
+        convs.map(async (c) => {
+          const localConv = localStore.find((lc) => lc.id === c.id);
+          const effectiveLastRead =
+            c.last_read_at ??
+            localConv?.last_read_at ??
+            c.created_at ??
+            new Date().toISOString();
+          return {
+            ...c,
+            lastMessage:  await getLastMessage(c.id),
+            unreadCount:  await getUnreadCount(c.id, effectiveLastRead),
+          };
+        })
       );
       await saveConversations(enriched);
       return enriched;
