@@ -182,6 +182,11 @@ export default function CallScreen() {
 
     /* Fetch ICE servers (includes TURN if configured on backend) */
     const iceServers = await getIceServers();
+    const turnCount = iceServers.filter(s => {
+      const urls = Array.isArray(s.urls) ? s.urls : [s.urls ?? ''];
+      return urls.some((u) => typeof u === 'string' && (u.startsWith('turn:') || u.startsWith('turns:')));
+    }).length;
+    log(`ICE setup: total=${iceServers.length} servers, TURN count=${turnCount}`);
     if (!_hasTurnServers) {
       warn('No TURN servers available — calls will fail on different networks/mobile');
       setTurnWarning(true);

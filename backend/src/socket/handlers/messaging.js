@@ -65,7 +65,13 @@ module.exports = function handleMessaging(io, socket, onlineUsers) {
         .single();
       if (!member) return callback?.({ error: 'Not a participant' });
 
-      await supabase.from('conversations').update({ updated_at: new Date().toISOString() }).eq('id', conversationId);
+      // Non-blocking timestamp bump — don't await (a failure here must never
+      // abort the send path; it is cosmetic and will self-heal on the next query).
+      supabase.from('conversations')
+        .update({ updated_at: new Date().toISOString() })
+        .eq('id', conversationId)
+        .then(() => {})
+        .catch((e) => console.warn('[message:send] conversations.update error:', e?.message));
 
       // Track ephemeral media so we can delete it after delivery
       if (storagePath && localId) {
@@ -128,8 +134,8 @@ module.exports = function handleMessaging(io, socket, onlineUsers) {
 
       callback?.({ success: true, timestamp: messageEvent.timestamp });
     } catch (err) {
-      console.error('[message:send]', err);
-      callback?.({ error: 'Failed to send message' });
+      console.error('[message:send] unhandled error:', err?.message ?? err);
+      callback?.({ error: err?.message || 'Failed to send message' });
     }
   });
 
