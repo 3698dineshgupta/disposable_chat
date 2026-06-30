@@ -1,7 +1,10 @@
 'use client';
 
-import { useEffect, useRef, useState } from 'react';
-import { PhoneOff, Mic, MicOff, Video, VideoOff, Volume2, VolumeX } from 'lucide-react';
+import { useEffect, useRef, useState, useCallback } from 'react';
+import {
+  PhoneOff, Mic, MicOff, Video, VideoOff, Volume2, VolumeX,
+  RotateCcw, Monitor, MonitorOff, MoreHorizontal, UserPlus, Minimize2,
+} from 'lucide-react';
 import { useCallStore } from '@/store/call';
 import { getSocket } from '@/lib/socket';
 import Avatar from '@/components/ui/Avatar';
@@ -13,15 +16,21 @@ export default function CallScreen() {
     activeCall, endCall, setLocalStream, setRemoteStream,
     setMuted, setCameraOn, setCallStatus, setCallId,
   } = useCallStore();
-  const [elapsed, setElapsed] = useState(0);
-  const [speaker, setSpeaker] = useState(true);
+
+  const [elapsed, setElapsed]             = useState(0);
+  const [speaker, setSpeaker]             = useState(true);
+  const [isScreenSharing, setIsScreenSharing] = useState(false);
+  const [showMoreMenu, setShowMoreMenu]   = useState(false);
+  const [facingMode, setFacingMode]       = useState<'user' | 'environment'>('user');
+  const [isMinimized, setIsMinimized]     = useState(false);
+
   const localVideoRef  = useRef<HTMLVideoElement>(null);
   const remoteVideoRef = useRef<HTMLVideoElement>(null);
   const remoteAudioRef = useRef<HTMLAudioElement>(null);
   const peerRef        = useRef<RTCPeerConnection | null>(null);
+  const screenStreamRef = useRef<MediaStream | null>(null);
+  const moreMenuRef    = useRef<HTMLDivElement>(null);
 
-  // Use startedAt as the key — callId changes after initiate callback which would
-  // re-trigger the effect and close the PC prematurely.
   useEffect(() => {
     if (!activeCall) return;
     const timer = setInterval(() =>
@@ -36,6 +45,18 @@ export default function CallScreen() {
     return () => { clearInterval(timer); cleanup(); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeCall?.startedAt]);
+
+  /* Close more-menu on outside click */
+  useEffect(() => {
+    if (!showMoreMenu) return;
+    const close = (e: MouseEvent) => {
+      if (moreMenuRef.current && !moreMenuRef.current.contains(e.target as Node)) {
+        setShowMoreMenu(false);
+      }
+    };
+    document.addEventListener('mousedown', close);
+    return () => document.removeEventListener('mousedown', close);
+  }, [showMoreMenu]);
 
   const waitForIce = (pc: RTCPeerConnection): Promise<void> =>
     new Promise((resolve) => {
@@ -58,7 +79,6 @@ export default function CallScreen() {
     });
     peerRef.current = pc;
 
-    // Get media — try with video first, fall back to audio-only
     try {
       const stream = await navigator.mediaDevices.getUserMedia({
         audio: true,
@@ -68,39 +88,30 @@ export default function CallScreen() {
       if (localVideoRef.current) localVideoRef.current.srcObject = stream;
       stream.getTracks().forEach((t) => pc.addTrack(t, stream));
     } catch {
-      // Video might be unavailable — try audio-only
       try {
         const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
         setLocalStream(stream);
         stream.getTracks().forEach((t) => pc.addTrack(t, stream));
       } catch (err: any) {
         console.warn('[WebRTC] no media available:', err.message);
-        toast('Microphone unavailable — others may not hear you', { icon: '🔇' });
+        toast('Microphone unavailable', { icon: '🔇' });
       }
     }
 
-    // Attach remote stream to the correct element
     pc.ontrack = (e) => {
       const [stream] = e.streams;
       setRemoteStream(stream);
-      // Always wire up the hidden audio element so voice calls work
       if (remoteAudioRef.current) remoteAudioRef.current.srcObject = stream;
-      // Also wire the video element for video calls
       if (remoteVideoRef.current) remoteVideoRef.current.srcObject = stream;
     };
 
     let disconnectTimer: ReturnType<typeof setTimeout> | null = null;
-
     pc.onconnectionstatechange = () => {
       const state = pc.connectionState;
-      console.log('[WebRTC] connectionState:', state);
-
       if (state === 'disconnected') {
-        // Give WebRTC 4 seconds to self-recover, then trigger ICE restart
         disconnectTimer = setTimeout(() => {
           if (pc.connectionState === 'disconnected' || pc.connectionState === 'failed') {
-            console.log('[WebRTC] triggering ICE restart');
-            pc.restartIce(); // will fire onnegotiationneeded on the initiator side
+            pc.restartIce();
           }
         }, 4000);
       } else if (state === 'connected') {
@@ -112,42 +123,32 @@ export default function CallScreen() {
       }
     };
 
-    // ICE restart renegotiation — only the initiator creates the new offer
     pc.onnegotiationneeded = async () => {
-      if (!activeCall.isInitiator) return;
-      if (pc.signalingState === 'closed') return;
+      if (!activeCall.isInitiator || pc.signalingState === 'closed') return;
       try {
         const restartOffer = await pc.createOffer({ iceRestart: true });
         await pc.setLocalDescription(restartOffer);
         await waitForIce(pc);
         socket.emit('call:offer', { peerId: activeCall.peerId, offer: pc.localDescription });
-        console.log('[WebRTC] sent ICE restart offer');
       } catch (err) { console.error('[WebRTC] restart offer failed:', err); }
     };
 
-    // Responder handles incoming ICE restart offer
     const restartOfferHandler = async ({ offer }: { offer: RTCSessionDescriptionInit }) => {
-      if (activeCall.isInitiator) return; // only responder handles this
+      if (activeCall.isInitiator || pc.signalingState === 'closed') return;
       try {
-        if (pc.signalingState === 'closed') return;
         await pc.setRemoteDescription(new RTCSessionDescription(offer));
         const restartAnswer = await pc.createAnswer();
         await pc.setLocalDescription(restartAnswer);
         await waitForIce(pc);
         socket.emit('call:answer-sdp', { peerId: activeCall.peerId, answer: pc.localDescription });
-        console.log('[WebRTC] sent ICE restart answer');
       } catch (err) { console.error('[WebRTC] restart answer failed:', err); }
     };
     socket.on('call:offer', restartOfferHandler);
 
-    // Initiator handles restart answer
     const restartAnswerHandler = async ({ answer }: { answer: RTCSessionDescriptionInit }) => {
-      if (!activeCall.isInitiator) return;
+      if (!activeCall.isInitiator || pc.signalingState === 'closed') return;
       try {
-        if (pc.signalingState !== 'closed') {
-          await pc.setRemoteDescription(new RTCSessionDescription(answer));
-          console.log('[WebRTC] ICE restart complete');
-        }
+        await pc.setRemoteDescription(new RTCSessionDescription(answer));
       } catch (err) { console.error('[WebRTC] restart setAnswer failed:', err); }
     };
     socket.on('call:answer-sdp', restartAnswerHandler);
@@ -156,7 +157,6 @@ export default function CallScreen() {
       try { if (pc.signalingState !== 'closed') await pc.addIceCandidate(new RTCIceCandidate(candidate)); } catch {}
     };
     socket.on('call:ice', iceHandler);
-
     pc.onicecandidate = (e) => {
       if (e.candidate) socket.emit('call:ice', { peerId: activeCall.peerId, candidate: e.candidate });
     };
@@ -185,7 +185,6 @@ export default function CallScreen() {
         if (res?.error) { toast.error('Could not reach the other user'); setCallStatus('failed'); return; }
         if (res?.callId) setCallId(res.callId);
       });
-
     } else {
       const offer = activeCall.incomingOffer;
       if (!offer) { toast.error('Incoming offer missing'); setCallStatus('failed'); return; }
@@ -205,6 +204,8 @@ export default function CallScreen() {
 
   const cleanup = () => {
     activeCall?.localStream?.getTracks().forEach((t) => t.stop());
+    screenStreamRef.current?.getTracks().forEach((t) => t.stop());
+    screenStreamRef.current = null;
     peerRef.current?.close();
     peerRef.current = null;
     getSocket()?.off('call:ice');
@@ -235,6 +236,59 @@ export default function CallScreen() {
     setCameraOn(!newOff);
   };
 
+  const flipCamera = useCallback(async () => {
+    if (!activeCall?.localStream || !peerRef.current) return;
+    const newFacing = facingMode === 'user' ? 'environment' : 'user';
+    try {
+      const newStream = await navigator.mediaDevices.getUserMedia({
+        audio: false,
+        video: { facingMode: newFacing },
+      });
+      const newTrack = newStream.getVideoTracks()[0];
+      const sender = peerRef.current.getSenders().find((s) => s.track?.kind === 'video');
+      if (sender) await sender.replaceTrack(newTrack);
+      // Replace local preview
+      if (localVideoRef.current) {
+        const combined = new MediaStream([
+          ...activeCall.localStream.getAudioTracks(),
+          newTrack,
+        ]);
+        localVideoRef.current.srcObject = combined;
+      }
+      setFacingMode(newFacing);
+    } catch (err) {
+      toast.error('Could not switch camera');
+    }
+  }, [facingMode, activeCall]);
+
+  const startScreenShare = async () => {
+    if (!peerRef.current) return;
+    setShowMoreMenu(false);
+    try {
+      const screenStream = await (navigator.mediaDevices as any).getDisplayMedia({ video: true, audio: false });
+      const screenTrack = screenStream.getVideoTracks()[0];
+      const sender = peerRef.current.getSenders().find((s) => s.track?.kind === 'video');
+      if (sender) await sender.replaceTrack(screenTrack);
+      if (localVideoRef.current) localVideoRef.current.srcObject = screenStream;
+      screenStreamRef.current = screenStream;
+      setIsScreenSharing(true);
+      screenTrack.onended = stopScreenShare;
+    } catch {
+      // User cancelled or permission denied — silent
+    }
+  };
+
+  const stopScreenShare = async () => {
+    if (!peerRef.current || !activeCall?.localStream) return;
+    const cameraTrack = activeCall.localStream.getVideoTracks()[0];
+    const sender = peerRef.current.getSenders().find((s) => s.track?.kind === 'video');
+    if (sender && cameraTrack) await sender.replaceTrack(cameraTrack);
+    if (localVideoRef.current) localVideoRef.current.srcObject = activeCall.localStream;
+    screenStreamRef.current?.getTracks().forEach((t) => t.stop());
+    screenStreamRef.current = null;
+    setIsScreenSharing(false);
+  };
+
   if (!activeCall) return null;
 
   const isVideo   = activeCall.type === 'video';
@@ -246,156 +300,232 @@ export default function CallScreen() {
     activeCall.status === 'answered' ? formatDuration(elapsed) :
     activeCall.status === 'failed'   ? 'Call failed'          : activeCall.status;
 
-  return (
-    <div style={{
-      position: 'fixed', inset: 0, zIndex: 100,
-      background: 'linear-gradient(135deg, #0a1628 0%, #0d2137 40%, #0a1f1a 100%)',
-      display: 'flex', flexDirection: 'column',
-      fontFamily: 'inherit',
-    }}>
-      {/* Hidden audio element — always present so remote audio plays in voice calls */}
-      <audio ref={remoteAudioRef} autoPlay playsInline style={{ display: 'none' }} />
-
-      {/* Ambient orbs */}
-      <div style={{
-        position: 'absolute', top: -120, left: -120, width: 400, height: 400,
-        borderRadius: '50%', background: 'radial-gradient(circle, rgba(0,168,132,0.12) 0%, transparent 70%)',
-        pointerEvents: 'none',
-      }} />
-      <div style={{
-        position: 'absolute', bottom: -80, right: -80, width: 350, height: 350,
-        borderRadius: '50%', background: 'radial-gradient(circle, rgba(0,120,255,0.08) 0%, transparent 70%)',
-        pointerEvents: 'none',
-      }} />
-
-      {/* Remote video (video calls) */}
-      {isVideo && (
-        <video ref={remoteVideoRef} autoPlay playsInline
-          style={{ position: 'absolute', inset: 0, width: '100%', height: '100%', objectFit: 'cover', opacity: activeCall.status === 'answered' ? 1 : 0, transition: 'opacity 0.5s' }} />
-      )}
-
-      {/* Main content */}
-      <div style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', position: 'relative', padding: '60px 24px 0' }}>
-
-        {/* Local PiP */}
-        {isVideo && (
-          <div style={{
-            position: 'absolute', top: 16, right: 16, width: 110, height: 150,
-            borderRadius: 16, overflow: 'hidden', boxShadow: '0 8px 32px rgba(0,0,0,0.5)',
-            border: '2px solid rgba(255,255,255,0.1)',
-          }}>
-            <video ref={localVideoRef} autoPlay playsInline muted
-              style={{ width: '100%', height: '100%', objectFit: 'cover', transform: 'scaleX(-1)' }} />
-          </div>
-        )}
-
-        {/* Avatar + pulse rings */}
-        <div style={{ position: 'relative', marginBottom: 28 }}>
-          {isCalling && (
-            <>
-              <div style={{
-                position: 'absolute', inset: -20, borderRadius: '50%',
-                border: '2px solid rgba(0,168,132,0.25)',
-                animation: 'callPulse 2s ease-out infinite',
-              }} />
-              <div style={{
-                position: 'absolute', inset: -40, borderRadius: '50%',
-                border: '2px solid rgba(0,168,132,0.12)',
-                animation: 'callPulse 2s ease-out infinite 0.5s',
-              }} />
-            </>
-          )}
-          <div style={{
-            width: 100, height: 100, borderRadius: '50%', overflow: 'hidden',
-            boxShadow: '0 0 0 4px rgba(0,168,132,0.3), 0 8px 32px rgba(0,0,0,0.4)',
-            position: 'relative',
-          }}>
-            <Avatar src={activeCall.peerInfo?.avatar_url} name={peerName} size="xl" />
-          </div>
-        </div>
-
-        <h2 style={{ fontSize: 26, fontWeight: 700, color: '#fff', margin: 0, letterSpacing: '-0.3px' }}>{peerName}</h2>
-
-        <p style={{
-          marginTop: 8, fontSize: 14, fontWeight: 500,
-          color: activeCall.status === 'answered' ? '#00c49a' : 'rgba(255,255,255,0.55)',
-          letterSpacing: '0.02em',
-        }}>
-          {statusLabel}
-          {(activeCall.status === 'calling' || activeCall.status === 'ringing') && (
-            <span style={{ display: 'inline-block', animation: 'dotBlink 1.4s infinite' }}>…</span>
-          )}
-        </p>
-
-        {/* Call type badge */}
+  /* ── Minimized floating bubble ── */
+  if (isMinimized) {
+    return (
+      <div
+        onClick={() => setIsMinimized(false)}
+        style={{
+          position: 'fixed', bottom: 80, right: 16, zIndex: 100,
+          width: 72, height: 72, borderRadius: '50%', cursor: 'pointer',
+          overflow: 'hidden', boxShadow: '0 4px 20px rgba(0,0,0,0.4)',
+          border: '2px solid rgba(0,168,132,0.6)',
+        }}
+      >
+        <Avatar src={activeCall.peerInfo?.avatar_url} name={peerName} size="xl" />
         <div style={{
-          marginTop: 16, display: 'inline-flex', alignItems: 'center', gap: 6,
-          background: 'rgba(255,255,255,0.06)', borderRadius: 20, padding: '6px 14px',
-          border: '1px solid rgba(255,255,255,0.08)',
+          position: 'absolute', inset: 0, background: 'rgba(0,0,0,0.3)',
+          display: 'flex', alignItems: 'flex-end', justifyContent: 'center', paddingBottom: 6,
         }}>
-          {isVideo
-            ? <Video size={14} style={{ color: '#00c49a' }} />
-            : <Volume2 size={14} style={{ color: '#00c49a' }} />}
-          <span style={{ fontSize: 12, color: 'rgba(255,255,255,0.6)' }}>
-            {isVideo ? 'Video call' : 'Voice call'}
+          <span style={{ fontSize: 10, color: '#fff', fontWeight: 600 }}>
+            {activeCall.status === 'answered' ? formatDuration(elapsed) : '...'}
           </span>
         </div>
       </div>
+    );
+  }
 
-      {/* Controls bar */}
+  return (
+    <div style={{
+      position: 'fixed', inset: 0, zIndex: 100,
+      background: 'linear-gradient(160deg, #0d1b2a 0%, #0d2137 60%, #071a14 100%)',
+      fontFamily: 'inherit', userSelect: 'none',
+    }}>
+      {/* Hidden audio for voice calls */}
+      <audio ref={remoteAudioRef} autoPlay playsInline style={{ display: 'none' }} />
+
+      {/* Remote video — full screen background */}
+      {isVideo && (
+        <video ref={remoteVideoRef} autoPlay playsInline
+          style={{
+            position: 'absolute', inset: 0, width: '100%', height: '100%',
+            objectFit: 'cover',
+            opacity: activeCall.status === 'answered' ? 1 : 0,
+            transition: 'opacity 0.6s',
+          }}
+        />
+      )}
+
+      {/* Overlay gradient for readability of top/bottom bars */}
       <div style={{
-        padding: '28px 32px 44px',
-        background: 'linear-gradient(to top, rgba(0,0,0,0.6) 0%, transparent 100%)',
+        position: 'absolute', inset: 0, pointerEvents: 'none',
+        background: 'linear-gradient(to bottom, rgba(0,0,0,0.55) 0%, transparent 25%, transparent 65%, rgba(0,0,0,0.7) 100%)',
+      }} />
+
+      {/* ── TOP BAR ── */}
+      <div style={{
+        position: 'absolute', top: 0, left: 0, right: 0,
+        display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+        padding: '52px 16px 16px',
       }}>
-        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 20 }}>
+        <TopBtn onClick={() => setIsMinimized(true)} title="Minimize">
+          <Minimize2 size={18} color="#fff" />
+        </TopBtn>
 
-          {/* Mute */}
-          <CallButton
-            onClick={toggleMute}
-            active={activeCall.isMuted}
-            label={activeCall.isMuted ? 'Unmute' : 'Mute'}
-            activeColor="#ef4444"
-          >
-            {activeCall.isMuted ? <MicOff size={22} color="#fff" /> : <Mic size={22} color="#fff" />}
-          </CallButton>
+        <div style={{ textAlign: 'center' }}>
+          <div style={{ fontSize: 17, fontWeight: 700, color: '#fff', letterSpacing: '-0.2px' }}>{peerName}</div>
+          <div style={{
+            fontSize: 13, fontWeight: 500, marginTop: 2,
+            color: activeCall.status === 'answered' ? '#00e5b0' : 'rgba(255,255,255,0.6)',
+          }}>
+            {statusLabel}
+          </div>
+          {isScreenSharing && (
+            <div style={{ fontSize: 11, color: '#60d9b0', marginTop: 2 }}>● Screen sharing</div>
+          )}
+        </div>
 
-          {/* End call */}
-          <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 8 }}>
-            <button onClick={handleHangup} style={{
-              width: 68, height: 68, borderRadius: '50%',
-              background: 'linear-gradient(135deg, #ff3b3b, #e00)',
-              border: 'none', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center',
-              boxShadow: '0 4px 24px rgba(220,0,0,0.5), 0 0 0 8px rgba(220,0,0,0.15)',
-              transition: 'transform 0.15s',
+        <TopBtn title="Add participant">
+          <UserPlus size={18} color="#fff" />
+        </TopBtn>
+      </div>
+
+      {/* ── CENTER (avatar + pulse rings, shown when no remote video) ── */}
+      {(!isVideo || activeCall.status !== 'answered') && (
+        <div style={{
+          position: 'absolute', inset: 0, display: 'flex', flexDirection: 'column',
+          alignItems: 'center', justifyContent: 'center',
+        }}>
+          <div style={{ position: 'relative', marginBottom: 24 }}>
+            {isCalling && (
+              <>
+                <div style={{ position: 'absolute', inset: -20, borderRadius: '50%',
+                  border: '2px solid rgba(0,168,132,0.25)',
+                  animation: 'callPulse 2s ease-out infinite' }} />
+                <div style={{ position: 'absolute', inset: -40, borderRadius: '50%',
+                  border: '2px solid rgba(0,168,132,0.12)',
+                  animation: 'callPulse 2s ease-out infinite 0.5s' }} />
+              </>
+            )}
+            <div style={{
+              width: 100, height: 100, borderRadius: '50%', overflow: 'hidden',
+              boxShadow: '0 0 0 4px rgba(0,168,132,0.3), 0 8px 32px rgba(0,0,0,0.4)',
+            }}>
+              <Avatar src={activeCall.peerInfo?.avatar_url} name={peerName} size="xl" />
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ── LOCAL VIDEO PiP ── */}
+      {isVideo && (
+        <div style={{
+          position: 'absolute',
+          bottom: 110, right: 12,
+          width: 110, height: 150,
+          borderRadius: 16, overflow: 'hidden',
+          boxShadow: '0 6px 28px rgba(0,0,0,0.5)',
+          border: '2px solid rgba(255,255,255,0.12)',
+        }}>
+          <video ref={localVideoRef} autoPlay playsInline muted
+            style={{ width: '100%', height: '100%', objectFit: 'cover', transform: 'scaleX(-1)' }} />
+
+          {/* Camera flip button overlaid on PiP */}
+          <button
+            onClick={flipCamera}
+            style={{
+              position: 'absolute', top: 6, right: 6,
+              width: 28, height: 28, borderRadius: '50%',
+              background: 'rgba(0,0,0,0.5)', border: 'none', cursor: 'pointer',
+              display: 'flex', alignItems: 'center', justifyContent: 'center',
+              backdropFilter: 'blur(4px)',
             }}
-              onMouseEnter={(e) => (e.currentTarget.style.transform = 'scale(1.08)')}
-              onMouseLeave={(e) => (e.currentTarget.style.transform = 'scale(1)')}
-            >
-              <PhoneOff size={26} color="#fff" />
-            </button>
-            <span style={{ fontSize: 11, color: 'rgba(255,255,255,0.5)', fontWeight: 500 }}>End</span>
+            title="Flip camera"
+          >
+            <RotateCcw size={13} color="#fff" />
+          </button>
+        </div>
+      )}
+
+      {/* ── BOTTOM CONTROL BAR ── */}
+      <div style={{
+        position: 'absolute', bottom: 0, left: 0, right: 0,
+        padding: '18px 28px 40px',
+        background: 'rgba(0,0,0,0.55)',
+        backdropFilter: 'blur(16px)',
+        borderTop: '1px solid rgba(255,255,255,0.06)',
+      }}>
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-evenly' }}>
+
+          {/* ⋯ More options */}
+          <div style={{ position: 'relative' }}>
+            <CtrlBtn onClick={() => setShowMoreMenu((v) => !v)} active={showMoreMenu}>
+              <MoreHorizontal size={22} color="#fff" />
+            </CtrlBtn>
+            {showMoreMenu && (
+              <div ref={moreMenuRef} style={{
+                position: 'absolute', bottom: 60, left: '50%', transform: 'translateX(-50%)',
+                background: 'rgba(30,30,30,0.95)', borderRadius: 14,
+                boxShadow: '0 8px 32px rgba(0,0,0,0.5)',
+                border: '1px solid rgba(255,255,255,0.1)',
+                minWidth: 180, overflow: 'hidden',
+                animation: 'ctxMenuIn 0.12s ease-out',
+              }}>
+                <MoreMenuItem
+                  icon={isScreenSharing ? <MonitorOff size={16} /> : <Monitor size={16} />}
+                  label={isScreenSharing ? 'Stop sharing' : 'Share screen'}
+                  onClick={isScreenSharing ? stopScreenShare : startScreenShare}
+                />
+              </div>
+            )}
           </div>
 
-          {/* Camera / Speaker */}
+          {/* Camera on/off (video calls) or Speaker (audio calls) */}
           {isVideo ? (
-            <CallButton
-              onClick={toggleCamera}
-              active={!activeCall.isCameraOn}
-              label={activeCall.isCameraOn ? 'Camera off' : 'Camera on'}
-              activeColor="#ef4444"
-            >
+            <CtrlBtn onClick={toggleCamera} active={!activeCall.isCameraOn}>
               {activeCall.isCameraOn ? <Video size={22} color="#fff" /> : <VideoOff size={22} color="#fff" />}
-            </CallButton>
+            </CtrlBtn>
           ) : (
-            <CallButton onClick={() => {
+            <CtrlBtn onClick={() => {
               setSpeaker((v) => {
                 const next = !v;
                 if (remoteAudioRef.current) remoteAudioRef.current.muted = !next;
                 return next;
               });
-            }} active={!speaker} label={speaker ? 'Speaker' : 'Muted spk'}>
+            }} active={!speaker}>
               {speaker ? <Volume2 size={22} color="#fff" /> : <VolumeX size={22} color="#fff" />}
-            </CallButton>
+            </CtrlBtn>
+          )}
+
+          {/* End call — red */}
+          <button
+            onClick={handleHangup}
+            style={{
+              width: 60, height: 60, borderRadius: '50%',
+              background: '#e53935',
+              border: 'none', cursor: 'pointer',
+              display: 'flex', alignItems: 'center', justifyContent: 'center',
+              boxShadow: '0 4px 20px rgba(229,57,53,0.5)',
+              transition: 'transform 0.15s, box-shadow 0.15s',
+            }}
+            onMouseEnter={(e) => {
+              e.currentTarget.style.transform = 'scale(1.08)';
+              e.currentTarget.style.boxShadow = '0 6px 28px rgba(229,57,53,0.7)';
+            }}
+            onMouseLeave={(e) => {
+              e.currentTarget.style.transform = 'scale(1)';
+              e.currentTarget.style.boxShadow = '0 4px 20px rgba(229,57,53,0.5)';
+            }}
+          >
+            <PhoneOff size={24} color="#fff" />
+          </button>
+
+          {/* Mute mic */}
+          <CtrlBtn onClick={toggleMute} active={activeCall.isMuted}>
+            {activeCall.isMuted ? <MicOff size={22} color="#fff" /> : <Mic size={22} color="#fff" />}
+          </CtrlBtn>
+
+          {/* Speaker toggle (video calls) */}
+          {isVideo && (
+            <CtrlBtn onClick={() => {
+              setSpeaker((v) => {
+                const next = !v;
+                if (remoteAudioRef.current) remoteAudioRef.current.muted = !next;
+                return next;
+              });
+            }} active={!speaker}>
+              {speaker ? <Volume2 size={22} color="#fff" /> : <VolumeX size={22} color="#fff" />}
+            </CtrlBtn>
           )}
         </div>
       </div>
@@ -405,38 +535,75 @@ export default function CallScreen() {
           0%   { transform: scale(1); opacity: 1; }
           100% { transform: scale(1.6); opacity: 0; }
         }
-        @keyframes dotBlink {
-          0%, 80%, 100% { opacity: 1; }
-          40%            { opacity: 0; }
+        @keyframes ctxMenuIn {
+          from { opacity: 0; transform: scale(0.92) translateY(6px); }
+          to   { opacity: 1; transform: scale(1) translateY(0); }
         }
       `}</style>
     </div>
   );
 }
 
-function CallButton({ children, onClick, active, label, activeColor = 'rgba(255,255,255,0.2)' }: {
+/* Small icon button for the top bar */
+function TopBtn({ children, onClick, title }: {
+  children: React.ReactNode;
+  onClick?: () => void;
+  title?: string;
+}) {
+  return (
+    <button onClick={onClick} title={title} style={{
+      width: 40, height: 40, borderRadius: '50%',
+      background: 'rgba(0,0,0,0.3)', border: '1px solid rgba(255,255,255,0.1)',
+      cursor: onClick ? 'pointer' : 'default', display: 'flex', alignItems: 'center', justifyContent: 'center',
+      backdropFilter: 'blur(8px)', transition: 'background 0.15s',
+    }}
+      onMouseEnter={(e) => (e.currentTarget.style.background = 'rgba(255,255,255,0.15)')}
+      onMouseLeave={(e) => (e.currentTarget.style.background = 'rgba(0,0,0,0.3)')}
+    >
+      {children}
+    </button>
+  );
+}
+
+/* Round control button for the bottom bar */
+function CtrlBtn({ children, onClick, active }: {
   children: React.ReactNode;
   onClick: () => void;
   active?: boolean;
-  label?: string;
-  activeColor?: string;
 }) {
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 8 }}>
-      <button onClick={onClick} style={{
-        width: 56, height: 56, borderRadius: '50%',
-        background: active ? activeColor : 'rgba(255,255,255,0.12)',
-        border: '1px solid rgba(255,255,255,0.1)',
-        cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center',
-        backdropFilter: 'blur(8px)',
-        transition: 'background 0.2s, transform 0.15s',
+    <button onClick={onClick} style={{
+      width: 52, height: 52, borderRadius: '50%',
+      background: active ? 'rgba(255,255,255,0.25)' : 'rgba(255,255,255,0.12)',
+      border: '1px solid rgba(255,255,255,0.08)',
+      cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center',
+      backdropFilter: 'blur(8px)', transition: 'background 0.15s, transform 0.1s',
+    }}
+      onMouseEnter={(e) => (e.currentTarget.style.background = 'rgba(255,255,255,0.22)')}
+      onMouseLeave={(e) => (e.currentTarget.style.background = active ? 'rgba(255,255,255,0.25)' : 'rgba(255,255,255,0.12)')}
+    >
+      {children}
+    </button>
+  );
+}
+
+/* Item inside the "more options" popup */
+function MoreMenuItem({ icon, label, onClick }: { icon: React.ReactNode; label: string; onClick: () => void }) {
+  const [hov, setHov] = useState(false);
+  return (
+    <button
+      onClick={onClick}
+      onMouseEnter={() => setHov(true)}
+      onMouseLeave={() => setHov(false)}
+      style={{
+        display: 'flex', alignItems: 'center', gap: 10, width: '100%',
+        padding: '12px 16px', border: 'none', cursor: 'pointer',
+        background: hov ? 'rgba(255,255,255,0.1)' : 'transparent',
+        color: '#fff', fontSize: 13.5, fontWeight: 500, fontFamily: 'inherit',
+        textAlign: 'left', transition: 'background 0.1s',
       }}
-        onMouseEnter={(e) => (e.currentTarget.style.background = active ? activeColor : 'rgba(255,255,255,0.2)')}
-        onMouseLeave={(e) => (e.currentTarget.style.background = active ? activeColor : 'rgba(255,255,255,0.12)')}
-      >
-        {children}
-      </button>
-      {label && <span style={{ fontSize: 11, color: 'rgba(255,255,255,0.5)', fontWeight: 500 }}>{label}</span>}
-    </div>
+    >
+      {icon} {label}
+    </button>
   );
 }

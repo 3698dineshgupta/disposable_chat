@@ -31,8 +31,18 @@ function initSocket(io) {
   io.on('connection', async (socket) => {
     const { userId } = socket;
 
-    if (!onlineUsers.has(userId)) onlineUsers.set(userId, new Set());
-    onlineUsers.get(userId).add(socket.id);
+    // Single-device: kick any existing socket sessions for this user
+    if (onlineUsers.has(userId)) {
+      for (const sid of [...onlineUsers.get(userId)]) {
+        const existing = io.sockets.sockets.get(sid);
+        if (existing) {
+          existing.emit('session:replaced');
+          existing.disconnect(true);
+        }
+      }
+    }
+    // Replace old set so the kicked socket's disconnect handler is a no-op
+    onlineUsers.set(userId, new Set([socket.id]));
 
     await supabase.from('users').update({ is_online: true, last_seen: new Date().toISOString() }).eq('id', userId);
     socket.broadcast.emit('user:online', { userId });

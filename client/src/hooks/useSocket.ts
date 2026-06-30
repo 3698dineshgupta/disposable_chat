@@ -8,7 +8,9 @@ import { updateMessageStatus } from '@/lib/db/index';
 import { useAuthStore } from '@/store/auth';
 import { useChatStore, type RawIncoming } from '@/store/chat';
 import { useCallStore } from '@/store/call';
+import { useUIStore } from '@/store/ui';
 import type { IncomingMessage, IncomingCall } from '@/types';
+import toast from 'react-hot-toast';
 
 export function useSocketSetup() {
   const { accessToken, isAuthenticated } = useAuthStore();
@@ -36,8 +38,7 @@ export function useSocketSetup() {
 
     /* ── Messages ── */
     socket.on('message:receive', (data: IncomingMessage) => {
-      messageBus.emit(data); // real-time delivery for active ChatWindow
-      // Also queue so ChatWindow picks it up even if it wasn't open yet
+      messageBus.emit(data);
       useChatStore.getState().queueIncoming([{
         conversationId: data.conversationId,
         senderId: data.senderId,
@@ -46,9 +47,20 @@ export function useSocketSetup() {
         localId: data.localId,
         timestamp: data.timestamp,
       }]);
+
+      // Increment unread count if this conversation isn't currently open
+      const { activeConversationId } = useUIStore.getState();
+      if (data.conversationId !== activeConversationId) {
+        const { conversations, updateConversation } = useChatStore.getState();
+        const conv = conversations.find((c) => c.id === data.conversationId);
+        updateConversation(data.conversationId, {
+          unreadCount: (conv?.unreadCount ?? 0) + 1,
+          updated_at: data.timestamp,
+        });
+      }
     });
 
-    /* Queue pending messages (offline delivery) so any ChatWindow can pick them up */
+    /* Queue pending messages (offline delivery) */
     socket.on('messages:pending', ({ messages }: { messages: any[] }) => {
       const shaped: RawIncoming[] = messages.map((m) => ({
         conversationId: m.conversation_id,
@@ -60,6 +72,20 @@ export function useSocketSetup() {
         pendingDbId: m.id,
       }));
       useChatStore.getState().queueIncoming(shaped);
+
+      // Increment unread counts per conversation for background messages
+      const { activeConversationId } = useUIStore.getState();
+      const perConv: Record<string, number> = {};
+      for (const m of messages) {
+        if (m.conversation_id !== activeConversationId) {
+          perConv[m.conversation_id] = (perConv[m.conversation_id] ?? 0) + 1;
+        }
+      }
+      const { conversations, updateConversation } = useChatStore.getState();
+      for (const [convId, count] of Object.entries(perConv)) {
+        const conv = conversations.find((c) => c.id === convId);
+        updateConversation(convId, { unreadCount: (conv?.unreadCount ?? 0) + count });
+      }
     });
 
     socket.on('message:delivered', ({ localId }: { localId: string }) => {
@@ -72,7 +98,6 @@ export function useSocketSetup() {
         updateMessage(id, { status: 'seen' });
         updateMessageStatus(id, 'seen');
       });
-      // Also update lastMessage in the conversation so the tick in ConversationItem refreshes
       if (cid) {
         const { conversations, updateConversation } = useChatStore.getState();
         const conv = conversations.find((c) => c.id === cid);
@@ -91,13 +116,14 @@ export function useSocketSetup() {
     socket.on('call:ended', () => useCallStore.getState().endCall());
     socket.on('call:rejected', () => useCallStore.getState().endCall());
 
-    /* Join room for any new conversation that gets added to the store while connected */
-    const joinNewConvRooms = () => {
-      const convIds: string[] = []; // placeholder — handled below
-    };
-    // Whenever a conversation:join is needed (called externally via getSocket().emit)
+    /* ── Single-device enforcement ── */
+    socket.on('session:replaced', () => {
+      useAuthStore.getState().logout();
+      toast.error('Signed in from another device. You have been logged out.', { duration: 5000 });
+    });
+
+    /* Re-join all known conversation rooms after reconnect */
     socket.on('connect', () => {
-      // Re-join all known conversation rooms after reconnect
       const { conversations } = useChatStore.getState?.() ?? {};
       (conversations ?? []).forEach((c: { id: string }) => {
         socket.emit('conversation:join', { conversationId: c.id });
@@ -110,12 +136,14 @@ export function useSocketSetup() {
       socket.off('typing:start');
       socket.off('typing:stop');
       socket.off('message:receive');
+      socket.off('messages:pending');
       socket.off('message:delivered');
       socket.off('message:seen');
       socket.off('message:react');
       socket.off('call:incoming');
       socket.off('call:ended');
       socket.off('call:rejected');
+      socket.off('session:replaced');
     };
   }, [accessToken, isAuthenticated]);
 

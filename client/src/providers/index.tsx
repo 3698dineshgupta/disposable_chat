@@ -6,7 +6,7 @@ import { Toaster } from 'react-hot-toast';
 import { useUIStore } from '@/store/ui';
 import { useAuthStore } from '@/store/auth';
 import { useSocketSetup } from '@/hooks/useSocket';
-import { setAccessToken } from '@/lib/api';
+import { authApi, setAccessToken } from '@/lib/api';
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -36,11 +36,25 @@ function ThemeManager() {
 }
 
 function AuthInitializer() {
-  const { setInitializing } = useAuthStore();
+  const { user, setInitializing, login, logout } = useAuthStore();
 
   useEffect(() => {
-    // No session restoration — user must log in fresh on every page load
-    setInitializing(false);
+    const init = async () => {
+      if (user) {
+        // Persisted user exists — try to get a fresh access token via httpOnly cookie
+        try {
+          const res = await authApi.refresh();
+          const newToken: string = res.data.accessToken;
+          setAccessToken(newToken);
+          login(user, newToken);
+        } catch {
+          // Refresh failed — session expired, single-device kicked, or cookie missing
+          logout();
+        }
+      }
+      setInitializing(false);
+    };
+    init();
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   return null;
@@ -64,7 +78,8 @@ function MobileViewDetector() {
 
 function StoreHydrator() {
   useEffect(() => {
-    useUIStore.persist.rehydrate(); // restore theme preference only
+    useAuthStore.persist.rehydrate();
+    useUIStore.persist.rehydrate();
   }, []);
   return null;
 }

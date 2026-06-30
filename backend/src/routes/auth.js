@@ -78,6 +78,9 @@ router.post('/login', async (req, res) => {
 
     await supabase.from('users').update({ is_online: true, last_seen: new Date().toISOString() }).eq('id', user.id);
 
+    // Single-device enforcement: revoke all previous sessions
+    await supabase.from('refresh_tokens').delete().eq('user_id', user.id);
+
     const accessToken = signAccessToken(user.id);
     const refreshToken = await signRefreshToken(user.id);
 

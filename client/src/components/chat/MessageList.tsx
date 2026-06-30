@@ -49,6 +49,7 @@ export default function MessageList({ messages, conversation, isLoading, hasMore
   const bottomRef = useRef<HTMLDivElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const prevLengthRef = useRef(0);
+  const initialScrollDoneRef = useRef(false);
   const typingUsers = useChatStore((s) => s.typingUsers[conversation.id] ?? {});
   const isAnyoneTyping = Object.values(typingUsers).some(Boolean);
 
@@ -59,9 +60,19 @@ export default function MessageList({ messages, conversation, isLoading, hasMore
     if (inView && hasMore && !isLoading) onLoadMore();
   }, [inView, hasMore, isLoading]);
 
-  /* Scroll to bottom when new messages arrive */
+  /* Reset scroll tracking when switching conversations */
   useEffect(() => {
-    if (messages.length > prevLengthRef.current) {
+    initialScrollDoneRef.current = false;
+    prevLengthRef.current = 0;
+  }, [conversation.id]);
+
+  /* Jump to newest message on first load; scroll on subsequent new messages */
+  useEffect(() => {
+    if (messages.length > 0 && !initialScrollDoneRef.current) {
+      // First batch ready (async from IndexedDB) — instant jump so user sees newest
+      bottomRef.current?.scrollIntoView({ behavior: 'instant' });
+      initialScrollDoneRef.current = true;
+    } else if (initialScrollDoneRef.current && messages.length > prevLengthRef.current) {
       const lastMsg = messages[messages.length - 1];
       if (lastMsg?.isMine) {
         bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -73,11 +84,6 @@ export default function MessageList({ messages, conversation, isLoading, hasMore
     }
     prevLengthRef.current = messages.length;
   }, [messages]);
-
-  /* Initial scroll to bottom */
-  useEffect(() => {
-    bottomRef.current?.scrollIntoView({ behavior: 'auto' });
-  }, [conversation.id]);
 
   const handleDelete = useCallback(async (msg: LocalMessage, forEveryone: boolean) => {
     if (forEveryone) {
