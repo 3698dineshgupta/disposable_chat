@@ -1,39 +1,38 @@
 const { Pool } = require('pg');
 const { supabase } = require('../config/database');
 
-async function ensureStorageBucket() {
-  const BUCKET_OPTS = {
-    public: true,
-    fileSizeLimit: 52428800, // 50 MB per file
-    allowedMimeTypes: ['image/*', 'video/*', 'audio/*', 'application/*', 'text/*'],
-  };
-  try {
-    const { error } = await supabase.storage.createBucket('media', BUCKET_OPTS);
-    if (!error) {
-      console.log('[Storage] media bucket created and set to public.');
-      return;
-    }
-    // Bucket already exists — ensure it is public regardless of how it was originally created.
-    // A previously-private bucket causes all public URLs to return 400/403.
-    if (error.message?.toLowerCase().includes('already exists') || error.message?.includes('Duplicate')) {
-      const { error: upErr } = await supabase.storage.updateBucket('media', BUCKET_OPTS);
-      if (upErr) {
-        console.warn('[Storage] updateBucket warning:', upErr.message);
-      } else {
-        console.log('[Storage] media bucket already existed — confirmed public.');
-      }
-    } else {
-      console.warn('[Storage] createBucket unexpected error:', error.message);
-    }
-  } catch (err) {
-    console.warn('[Storage] bucket init skipped:', err.message);
-  }
-}
-
 async function runAIMigration() {
   if (!process.env.DATABASE_URL) return;
 
   const pool = new Pool({ connectionString: process.env.DATABASE_URL, ssl: { rejectUnauthorized: false } });
+
+  // ── Storage bucket: set public=true via direct SQL ──────────────────────────
+  // The Supabase JS client's updateBucket() silently fails when the bucket was
+  // originally created as private. The postgres superuser can write storage.buckets
+  // directly — this is authoritative and takes effect immediately.
+  // (Symptom of broken state: uploads succeed but public URLs return 404.)
+  try {
+    await pool.query(`
+      INSERT INTO storage.buckets (id, name, public, file_size_limit, created_at, updated_at)
+      VALUES ('media', 'media', true, 52428800, NOW(), NOW())
+      ON CONFLICT (id) DO UPDATE SET
+        public          = true,
+        file_size_limit = 52428800,
+        updated_at      = NOW()
+    `);
+    console.log('[Storage] media bucket: confirmed public via SQL.');
+  } catch (err) {
+    console.warn('[Storage] SQL bucket init skipped:', err.message);
+    // Fall back to JS client (best-effort)
+    try {
+      const opts = { public: true, fileSizeLimit: 52428800 };
+      const { error: cErr } = await supabase.storage.createBucket('media', opts);
+      if (cErr) await supabase.storage.updateBucket('media', opts);
+      console.log('[Storage] media bucket set via JS client (SQL fallback path).');
+    } catch (e) {
+      console.warn('[Storage] media bucket init failed entirely:', e.message);
+    }
+  }
   try {
     // pending_messages must exist before the server starts handling socket events.
     // Rows are inserted before every real-time emit (guaranteed delivery) and deleted
@@ -120,7 +119,4 @@ async function runAIMigration() {
   }
 }
 
-module.exports = async function runAll() {
-  await ensureStorageBucket();
-  await runAIMigration();
-};
+module.exports = runAIMigration;
