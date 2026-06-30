@@ -9,6 +9,7 @@ import { useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   generateKeyPair, generateSigningKeys, exportPublicKey, exportSigningPublicKey,
   importPublicKey, importSigningPublicKey, loadKeyPair, persistKeyPair,
+  clearSharedSecretCache,
 } from '@/lib/crypto/index';
 import { storeKey, retrieveKey } from '@/lib/db/index';
 import { authApi } from '@/lib/api';
@@ -107,15 +108,25 @@ export default function ChatWindow({ conversationId }: Props) {
       } else if (!_keysUploadedThisSession) {
         // Keys exist in IndexedDB but haven't been pushed to the server yet this
         // session. This covers: (a) first upload failed due to a network error,
-        // (b) the user is on a new device that had IndexedDB from a previous
-        // install, (c) the server DB was reset. Non-blocking — setCryptoCtx runs
-        // even if the upload fails (local keys are still usable for sending).
+        // (b) the user is on a new device, (c) the server DB was reset.
+        // IMPORTANT: only set _keysUploadedThisSession = true AFTER the upload
+        // succeeds. If we set it immediately and the upload fails, the flag
+        // prevents any retry this session and recipients get decrypt failures.
         const publicKeyRaw = await exportPublicKey(loaded.keyPair.publicKey);
         const signingPublicKeyRaw = await exportSigningPublicKey(loaded.signingKeyPair.publicKey);
-        authApi.updateKeys(publicKeyRaw, signingPublicKeyRaw)
-          .catch((err) => console.warn('[E2EE] key sync to server failed:', err?.message));
-        _keysUploadedThisSession = true;
+        try {
+          await authApi.updateKeys(publicKeyRaw, signingPublicKeyRaw);
+          _keysUploadedThisSession = true;
+          console.log('[E2EE] key sync to server succeeded');
+        } catch (err) {
+          console.warn('[E2EE] key sync to server failed — will retry on next conversation open:', (err as Error)?.message);
+          // _keysUploadedThisSession stays false so next open retries the upload
+        }
       }
+
+      // Clear stale shared-secret cache entries whenever the peer's key may have
+      // changed (this effect re-runs when conversation.other_public_key changes).
+      clearSharedSecretCache();
 
       setCryptoCtx({
         myPrivateKey: loaded.keyPair.privateKey,
