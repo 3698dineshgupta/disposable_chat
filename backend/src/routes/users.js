@@ -108,6 +108,19 @@ router.post('/me/avatar', authenticate, upload.single('avatar'), async (req, res
   }
 });
 
+/* ── Ensure the media bucket exists and is public ── */
+async function ensureMediaBucket() {
+  const opts = { public: true, fileSizeLimit: 52428800 };
+  const { error } = await supabase.storage.createBucket('media', opts);
+  if (!error) return;
+  const msg = (error.message ?? '').toLowerCase();
+  if (msg.includes('already exists') || msg.includes('duplicate')) {
+    await supabase.storage.updateBucket('media', opts);
+  } else {
+    throw new Error(error.message);
+  }
+}
+
 /* ── Upload media file (ephemeral — deleted after message:seen) ── */
 router.post('/upload', authenticate, upload.single('file'), async (req, res) => {
   try {
@@ -116,18 +129,36 @@ router.post('/upload', authenticate, upload.single('file'), async (req, res) => 
     const ext = safeExtension(req.file.mimetype); // never trust client filename
     const storagePath = `temp/${randomUUID()}.${ext}`;
 
-    const { error: upErr } = await supabase.storage.from('media').upload(storagePath, req.file.buffer, { contentType: req.file.mimetype });
+    let { error: upErr } = await supabase.storage
+      .from('media')
+      .upload(storagePath, req.file.buffer, { contentType: req.file.mimetype });
+
+    // Bucket missing → create it and retry once
     if (upErr) {
-      // Do NOT fall back to a base64 data-URI — a typical image is 1-5 MB which
-      // would exceed the 64 KB socket payload limit and cause "Payload too large".
-      // Instead, surface the real error so it can be fixed (usually a missing bucket).
-      console.error('[upload] Supabase Storage error:', upErr.message, '| bucket: media | path:', storagePath);
+      const msg = (upErr.message ?? '').toLowerCase();
+      if (msg.includes('not found') || msg.includes('bucket') || msg.includes('does not exist')) {
+        console.warn('[upload] media bucket missing — creating and retrying:', upErr.message);
+        try {
+          await ensureMediaBucket();
+          const retry = await supabase.storage
+            .from('media')
+            .upload(storagePath, req.file.buffer, { contentType: req.file.mimetype });
+          upErr = retry.error;
+        } catch (bucketErr) {
+          console.error('[upload] bucket creation failed:', bucketErr?.message);
+        }
+      }
+    }
+
+    if (upErr) {
+      console.error('[upload] Supabase Storage error:', upErr.message, '| path:', storagePath);
       return res.status(500).json({ error: `Storage upload failed: ${upErr.message}` });
     }
 
     const { data: pub } = supabase.storage.from('media').getPublicUrl(storagePath);
     res.json({ url: pub.publicUrl, storagePath, name: req.file.originalname, size: req.file.size, type: req.file.mimetype });
   } catch (err) {
+    console.error('[upload] unexpected error:', err?.message ?? err);
     res.status(500).json({ error: 'Upload failed' });
   }
 });

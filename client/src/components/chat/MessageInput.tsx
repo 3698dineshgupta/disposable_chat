@@ -55,9 +55,16 @@ export default function MessageInput({ conversationId, replyingTo, onClearReply,
     stopTyping();
     onSend(t, 'text', replyingTo ? { replyTo: replyingTo.localId } : undefined);
     setText('');
-    if (textareaRef.current) textareaRef.current.style.height = 'auto';
     setShowEmoji(false);
     onClearReply();
+    // Reset height and keep keyboard open on mobile — refocus after React flushes the
+    // state update, otherwise Android Chrome closes the keyboard when value is cleared.
+    requestAnimationFrame(() => {
+      if (textareaRef.current) {
+        textareaRef.current.style.height = 'auto';
+        textareaRef.current.focus();
+      }
+    });
   };
 
   const handleFile = async (file: File) => {

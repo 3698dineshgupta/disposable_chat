@@ -46,6 +46,16 @@ const PUBLIC_TURN_FALLBACK = [
   },
 ];
 
+function httpsGet(url) {
+  return new Promise((resolve, reject) => {
+    https.get(url, (res) => {
+      let body = '';
+      res.on('data', (c) => { body += c; });
+      res.on('end', () => resolve({ status: res.statusCode, body }));
+    }).on('error', reject);
+  });
+}
+
 async function fetchMeteredServers() {
   const domain = process.env.METERED_DOMAIN;
   const apiKey = process.env.METERED_API_KEY;
@@ -56,35 +66,37 @@ async function fetchMeteredServers() {
     return _meteredCache;
   }
 
-  return new Promise((resolve) => {
-    const url = `https://${domain}/api/v1/turn/credentials?apiKey=${apiKey}`;
-    console.log(`[ICE] fetching Metered.ca credentials from: ${url}`);
-    https.get(url, (res) => {
-      let body = '';
-      res.on('data', chunk => { body += chunk; });
-      res.on('end', () => {
-        console.log(`[ICE] Metered.ca HTTP ${res.statusCode}, body[0..200]: ${body.substring(0, 200)}`);
-        try {
-          const servers = JSON.parse(body);
-          if (Array.isArray(servers) && servers.length > 0) {
-            _meteredCache  = servers;
-            _meteredCacheAt = Date.now();
-            console.log(`[ICE] fetched ${servers.length} Metered.ca servers (TURN count: ${servers.filter(s => String(s.urls || s.url || '').startsWith('turn:')).length})`);
-            resolve(servers);
-          } else {
-            console.warn('[ICE] Metered.ca returned empty/invalid array — check domain and API key in Render env vars');
-            resolve([]);
-          }
-        } catch (e) {
-          console.warn('[ICE] Metered.ca parse error:', e.message, '| raw:', body.substring(0, 100));
-          resolve([]);
-        }
-      });
-    }).on('error', (e) => {
-      console.warn('[ICE] Metered.ca fetch error:', e.message);
-      resolve(_meteredCache || []);
-    });
-  });
+  // Metered.ca REST API uses "Secret Key" from the Developers tab.
+  // Try secretKey first (correct Metered REST API param), fall back to apiKey.
+  const urlsToTry = [
+    `https://${domain}/api/v1/turn/credentials?secretKey=${apiKey}`,
+    `https://${domain}/api/v1/turn/credentials?apiKey=${apiKey}`,
+  ];
+
+  for (const url of urlsToTry) {
+    try {
+      console.log(`[ICE] fetching Metered.ca credentials: ${url}`);
+      const { status, body } = await httpsGet(url);
+      console.log(`[ICE] Metered.ca HTTP ${status}, body[0..300]: ${body.substring(0, 300)}`);
+      const servers = JSON.parse(body);
+      if (Array.isArray(servers) && servers.length > 0) {
+        _meteredCache   = servers;
+        _meteredCacheAt = Date.now();
+        const turnCount = servers.filter(s => {
+          const u = Array.isArray(s.urls) ? s.urls.join(',') : (s.urls ?? s.url ?? '');
+          return u.includes('turn:') || u.includes('turns:');
+        }).length;
+        console.log(`[ICE] Metered.ca: ${servers.length} total servers, ${turnCount} TURN`);
+        return servers;
+      }
+      console.warn(`[ICE] Metered.ca ${url} returned empty — trying next format`);
+    } catch (e) {
+      console.warn(`[ICE] Metered.ca fetch/parse error for ${url}:`, e.message);
+    }
+  }
+
+  console.warn('[ICE] Metered.ca: all credential URLs failed or returned empty.');
+  return _meteredCache || [];
 }
 
 /* ── ICE server credentials for WebRTC ── */
