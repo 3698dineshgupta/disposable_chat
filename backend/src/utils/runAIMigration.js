@@ -1,13 +1,36 @@
 const { Pool } = require('pg');
 
-/**
- * Creates the three tables required for the AI auto-reply feature.
- * Called once on server startup — fully idempotent (IF NOT EXISTS).
- */
 async function runAIMigration() {
   if (!process.env.DATABASE_URL) return;
 
   const pool = new Pool({ connectionString: process.env.DATABASE_URL, ssl: { rejectUnauthorized: false } });
+  try {
+    // pending_messages must exist before the server starts handling socket events.
+    // Rows are inserted before every real-time emit (guaranteed delivery) and deleted
+    // by message:seen / messages:acknowledge from the client.
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS pending_messages (
+        id               uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+        conversation_id  uuid NOT NULL,
+        sender_id        uuid NOT NULL,
+        recipient_id     uuid NOT NULL,
+        encrypted_payload jsonb NOT NULL,
+        message_type     text NOT NULL DEFAULT 'text',
+        local_id         text,
+        created_at       timestamptz NOT NULL DEFAULT now()
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_pending_messages_recipient
+        ON pending_messages (recipient_id, created_at);
+
+      CREATE INDEX IF NOT EXISTS idx_pending_messages_local_id
+        ON pending_messages (local_id) WHERE local_id IS NOT NULL;
+    `);
+    console.log('[DB] pending_messages table verified/created.');
+  } catch (err) {
+    console.warn('[DB] pending_messages migration skipped:', err.message);
+  }
+
   try {
     await pool.query(`
       CREATE TABLE IF NOT EXISTS ai_conversation_settings (
@@ -36,10 +59,8 @@ async function runAIMigration() {
         UNIQUE (user_id, (subscription->>'endpoint'))
       );
     `);
-    console.log('[AI] Tables verified/created.');
+    console.log('[AI] AI tables verified/created.');
   } catch (err) {
-    // Non-fatal: if the migration fails (e.g. tables already exist with constraints),
-    // the server still starts but AI features will degrade gracefully.
     console.warn('[AI] Migration skipped:', err.message);
   } finally {
     await pool.end();

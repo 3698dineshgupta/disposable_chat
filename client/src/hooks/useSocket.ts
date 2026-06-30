@@ -159,6 +159,15 @@ export function useSocketSetup() {
     };
     socket.on('call:incoming', onCallIncoming);
 
+    // Buffer ICE candidates here (in useSocket) so they are never dropped during the
+    // window between call:incoming / startCall and CallScreen.setupWebRTC registering
+    // its named iceHandler. CallScreen drains this buffer after registering its handler.
+    const onCallIce = ({ candidate, from }: { candidate: RTCIceCandidateInit; from: string }) => {
+      log(`call:ice buffering candidate from=${from}`);
+      useCallStore.getState().addPendingIceCandidate(candidate);
+    };
+    socket.on('call:ice', onCallIce);
+
     const onCallEnded = ({ callId }: { callId: string }) => {
       log(`call:ended callId=${callId}`);
       useCallStore.getState().endCall();
@@ -207,6 +216,7 @@ export function useSocketSetup() {
       socket.off('message:seen',      onMessageSeen);
       socket.off('message:react',     onMessageReact);
       socket.off('call:incoming',     onCallIncoming);
+      socket.off('call:ice',          onCallIce);
       socket.off('call:ended',        onCallEnded);
       socket.off('call:rejected',     onCallRejected);
       socket.off('session:replaced',  onSessionReplaced);

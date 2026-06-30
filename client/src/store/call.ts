@@ -4,6 +4,8 @@ import type { ActiveCall, CallType, CallStatus, IncomingCall } from '@/types';
 interface CallState {
   activeCall: ActiveCall | null;
   incomingCall: IncomingCall | null;
+  // ICE candidates that arrive before setupWebRTC registers its handler
+  pendingIceCandidates: RTCIceCandidateInit[];
 
   startCall: (call: Omit<ActiveCall, 'startedAt' | 'isMuted' | 'isCameraOn' | 'isSpeakerOn' | 'isScreenSharing' | 'localStream' | 'remoteStream'>) => void;
   setCallStatus: (status: CallStatus) => void;
@@ -15,16 +17,19 @@ interface CallState {
   setSpeakerOn: (v: boolean) => void;
   setScreenSharing: (v: boolean) => void;
   endCall: () => void;
-
   setIncomingCall: (call: IncomingCall | null) => void;
+  addPendingIceCandidate: (candidate: RTCIceCandidateInit) => void;
+  drainPendingIceCandidates: () => RTCIceCandidateInit[];
 }
 
-export const useCallStore = create<CallState>()((set) => ({
+export const useCallStore = create<CallState>()((set, get) => ({
   activeCall: null,
   incomingCall: null,
+  pendingIceCandidates: [],
 
   startCall: (call) =>
     set({
+      pendingIceCandidates: [], // clear any stale candidates from a previous call
       activeCall: {
         ...call,
         startedAt: Date.now(),
@@ -57,8 +62,17 @@ export const useCallStore = create<CallState>()((set) => ({
       if (s.activeCall?.localStream) {
         s.activeCall.localStream.getTracks().forEach(t => t.stop());
       }
-      return { activeCall: null };
+      return { activeCall: null, pendingIceCandidates: [] };
     }),
 
   setIncomingCall: (call) => set({ incomingCall: call }),
+
+  addPendingIceCandidate: (candidate) =>
+    set((s) => ({ pendingIceCandidates: [...s.pendingIceCandidates, candidate] })),
+
+  drainPendingIceCandidates: () => {
+    const candidates = get().pendingIceCandidates;
+    set({ pendingIceCandidates: [] });
+    return candidates;
+  },
 }));

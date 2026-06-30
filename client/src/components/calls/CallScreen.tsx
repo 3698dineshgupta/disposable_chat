@@ -248,7 +248,16 @@ export default function CallScreen() {
       addIceCandidate(pc, candidate);
     };
     iceHandlerRef.current = iceHandler;
+    // IMPORTANT: useSocket.ts also has a call:ice handler that buffers candidates into
+    // the call store. By adding our handler here, BOTH run. That's intentional:
+    // - useSocket handler buffers (for the next call's setupWebRTC)
+    // - This handler processes for the CURRENT active RTCPeerConnection
+    // Drain any candidates that arrived between call:incoming and now (the gap where
+    // no RTCPeerConnection existed yet to receive them).
     socket.on('call:ice', iceHandler);
+    const preBuffered = useCallStore.getState().drainPendingIceCandidates();
+    log(`draining ${preBuffered.length} pre-buffered ICE candidates from call store`);
+    for (const c of preBuffered) iceCandidateBuffer.current.push(c);
 
     /* ── Connection state monitoring ── */
     pc.onconnectionstatechange = () => {

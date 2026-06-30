@@ -206,6 +206,10 @@ export function useMessages(conversation: Conversation | null, cryptoCtx: Crypto
   }, [conversationId, user, decryptPayload, addMessage, updateMessage]);
 
   /* ── Process queued incoming messages (received while this ChatWindow was not open) ── */
+  // React to queue changes so messages that failed to decrypt via messageBus (race with
+  // crypto context loading) are retried as soon as they land in the queue.
+  const rawQueueLength = useChatStore((s) => (s.rawIncoming[conversationId ?? ''] ?? []).length);
+
   useEffect(() => {
     if (!conversationId || !user || isLoading) return;
     if (!cryptoCtx.myPrivateKey || !cryptoCtx.theirPublicKeyB64) return;
@@ -266,8 +270,10 @@ export function useMessages(conversation: Conversation | null, cryptoCtx: Crypto
     };
 
     processQueue().catch(console.error);
+  // rawQueueLength is intentionally included: re-run whenever new items arrive so
+  // messages that failed messageBus decryption (crypto context race) are retried.
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [conversationId, isLoading, cryptoCtx.myPrivateKey, cryptoCtx.theirPublicKeyB64]);
+  }, [conversationId, isLoading, rawQueueLength, cryptoCtx.myPrivateKey, cryptoCtx.theirPublicKeyB64]);
 
   /* ── Send message ── */
   const sendMessage = useCallback(async (
