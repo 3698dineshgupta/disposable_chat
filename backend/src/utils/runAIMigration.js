@@ -32,6 +32,29 @@ async function runAIMigration() {
   }
 
   try {
+    // Calls table — stores call history and is required by the call:initiate handler.
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS calls (
+        id               uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+        caller_id        uuid NOT NULL,
+        callee_id        uuid NOT NULL,
+        type             text NOT NULL DEFAULT 'audio',
+        status           text NOT NULL DEFAULT 'calling',
+        conversation_id  uuid,
+        answered_at      timestamptz,
+        ended_at         timestamptz,
+        duration         integer,
+        created_at       timestamptz NOT NULL DEFAULT now()
+      );
+      CREATE INDEX IF NOT EXISTS idx_calls_caller ON calls (caller_id, created_at);
+      CREATE INDEX IF NOT EXISTS idx_calls_callee ON calls (callee_id, created_at);
+    `);
+    console.log('[DB] calls table verified/created.');
+  } catch (err) {
+    console.warn('[DB] calls table migration skipped:', err.message);
+  }
+
+  try {
     await pool.query(`
       CREATE TABLE IF NOT EXISTS ai_conversation_settings (
         id          uuid PRIMARY KEY DEFAULT gen_random_uuid(),

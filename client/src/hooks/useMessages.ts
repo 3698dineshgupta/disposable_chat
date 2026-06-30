@@ -404,12 +404,18 @@ export function useMessages(
           localId,
           storagePath: extra?.storagePath ?? null,
         }, (res: { success?: boolean; error?: string }) => {
-          if (res.success) {
+          if (res?.success) {
             updateMessage(localId, { status: 'sent' });
             updateMessageStatus(localId, 'sent');
           } else {
             updateMessage(localId, { status: 'failed' });
             updateMessageStatus(localId, 'failed');
+            // Show the actual server error so we can diagnose the failure
+            const errMsg = res?.error ?? 'Unknown server error';
+            console.error('[message:send] server rejected:', errMsg);
+            import('react-hot-toast').then(({ default: toast }) => {
+              toast.error(`Send failed: ${errMsg}`, { id: 'msg-send-err', duration: 5000 });
+            }).catch(() => {});
           }
         });
       } else {
@@ -417,9 +423,13 @@ export function useMessages(
         updateMessage(localId, { status: 'pending' });
       }
     } catch (err) {
-      console.error('[sendMessage error]', err);
+      const errMsg = (err as Error)?.message ?? String(err);
+      console.error('[sendMessage error]', errMsg);
       updateMessage(localId, { status: 'failed' });
       updateMessageStatus(localId, 'failed');
+      import('react-hot-toast').then(({ default: toast }) => {
+        toast.error(`Encryption error: ${errMsg}`, { id: 'msg-crypto-err', duration: 6000 });
+      }).catch(() => {});
     }
   }, [conversationId, user, conversation, cryptoCtx, addMessage, updateMessage]);
 

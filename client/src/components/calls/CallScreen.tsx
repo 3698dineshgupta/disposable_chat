@@ -29,17 +29,24 @@ const FALLBACK_ICE: RTCIceServer[] = [
   { urls: 'stun:stun1.l.google.com:19302' },
 ];
 
+let _hasTurnServers = false; // module-level — set once per page session
+
 async function getIceServers(): Promise<RTCIceServer[]> {
   try {
     const res = await callsApi.iceServers();
     const servers = res.data?.iceServers;
     if (Array.isArray(servers) && servers.length > 0) {
-      log('ICE servers loaded from backend:', servers.map(s => JSON.stringify(s.urls)));
+      _hasTurnServers = servers.some((s) => {
+        const urls = Array.isArray(s.urls) ? s.urls : [s.urls];
+        return urls.some((u: string) => typeof u === 'string' && u.startsWith('turn:'));
+      });
+      log('ICE servers loaded from backend:', servers.map(s => JSON.stringify(s.urls)), 'hasTurn=', _hasTurnServers);
       return servers;
     }
   } catch (e) {
     warn('Could not fetch ICE servers from backend, using fallback STUN:', (e as Error).message);
   }
+  _hasTurnServers = false;
   return FALLBACK_ICE;
 }
 
@@ -58,6 +65,7 @@ export default function CallScreen() {
   const [showMoreMenu, setShowMoreMenu]       = useState(false);
   const [facingMode, setFacingMode]           = useState<'user' | 'environment'>('user');
   const [isMinimized, setIsMinimized]         = useState(false);
+  const [turnWarning, setTurnWarning]         = useState(false); // true = TURN missing, show warning
 
   /* ── DOM refs ── */
   const localVideoRef  = useRef<HTMLVideoElement>(null);
@@ -117,10 +125,11 @@ export default function CallScreen() {
 
     // Close RTCPeerConnection
     if (peerRef.current) {
-      peerRef.current.onicecandidate       = null;
-      peerRef.current.ontrack              = null;
-      peerRef.current.onconnectionstatechange = null;
-      peerRef.current.onnegotiationneeded  = null;
+      peerRef.current.onicecandidate            = null;
+      peerRef.current.ontrack                   = null;
+      peerRef.current.onconnectionstatechange   = null;
+      peerRef.current.oniceconnectionstatechange = null;
+      peerRef.current.onnegotiationneeded       = null;
       peerRef.current.onicegatheringstatechange = null;
       peerRef.current.close();
       peerRef.current = null;
@@ -173,6 +182,10 @@ export default function CallScreen() {
 
     /* Fetch ICE servers (includes TURN if configured on backend) */
     const iceServers = await getIceServers();
+    if (!_hasTurnServers) {
+      warn('No TURN servers available — calls will fail on different networks/mobile');
+      setTurnWarning(true);
+    }
 
     const pc = new RTCPeerConnection({ iceServers, iceCandidatePoolSize: 10 });
     peerRef.current = pc;
@@ -278,6 +291,26 @@ export default function CallScreen() {
         warn('connection failed');
         toast.error('Call connection lost');
         setCallStatus('failed');
+      }
+    };
+
+    /* ── ICE connection state — fires earlier than connectionState ── */
+    pc.oniceconnectionstatechange = () => {
+      const iceState = pc.iceConnectionState;
+      log(`ICE connection state: ${iceState}`);
+      if (iceState === 'failed') {
+        // ICE gave up. Without TURN, this is expected on mobile/different networks.
+        if (!_hasTurnServers) {
+          toast.error(
+            'Call failed: TURN relay servers not configured. Add METERED_DOMAIN and METERED_API_KEY to your Render environment.',
+            { id: 'ice-fail', duration: 10_000 },
+          );
+        } else {
+          toast.error('Call connection failed — check your network', { id: 'ice-fail', duration: 6_000 });
+        }
+      } else if (iceState === 'disconnected') {
+        // Transient; give WebRTC a chance to recover before restarting
+        log('ICE disconnected — waiting before restart');
       }
     };
 
@@ -606,6 +639,11 @@ export default function CallScreen() {
             fontSize: 13, fontWeight: 500, marginTop: 2,
             color: isAnswered ? '#00e5b0' : 'rgba(255,255,255,0.6)',
           }}>{statusLabel}</div>
+          {turnWarning && (
+            <div style={{ fontSize: 10, color: '#ffcc00', marginTop: 4, maxWidth: 220 }}>
+              ⚠ TURN relay not configured — calls may fail across different networks
+            </div>
+          )}
           {isScreenSharing && (
             <div style={{ fontSize: 11, color: '#60d9b0', marginTop: 2 }}>● Sharing screen</div>
           )}
