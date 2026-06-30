@@ -16,8 +16,14 @@ router.post('/register', async (req, res) => {
     const { email, username, display_name, password } = req.body;
     if (!email || !username || !display_name || !password)
       return res.status(400).json({ error: 'All fields are required' });
-    if (password.length < 8)
-      return res.status(400).json({ error: 'Password must be at least 8 characters' });
+    if (typeof email !== 'string' || email.length > 254)
+      return res.status(400).json({ error: 'Invalid email' });
+    if (typeof username !== 'string' || !/^[a-zA-Z0-9_]{3,30}$/.test(username))
+      return res.status(400).json({ error: 'Username must be 3–30 characters (letters, numbers, _)' });
+    if (typeof display_name !== 'string' || display_name.trim().length > 100)
+      return res.status(400).json({ error: 'Display name must be ≤ 100 characters' });
+    if (password.length < 8 || password.length > 128)
+      return res.status(400).json({ error: 'Password must be 8–128 characters' });
 
     const { data: existing } = await supabase
       .from('users')
@@ -41,7 +47,7 @@ router.post('/register', async (req, res) => {
     const refreshToken = await signRefreshToken(user.id);
 
     res.cookie('refresh_token', refreshToken, {
-      httpOnly: true, secure: process.env.NODE_ENV === 'production', sameSite: 'lax',
+      httpOnly: true, secure: process.env.NODE_ENV === 'production', sameSite: 'strict',
       maxAge: 30 * 24 * 60 * 60 * 1000,
     });
 
@@ -76,7 +82,7 @@ router.post('/login', async (req, res) => {
     const refreshToken = await signRefreshToken(user.id);
 
     res.cookie('refresh_token', refreshToken, {
-      httpOnly: true, secure: process.env.NODE_ENV === 'production', sameSite: 'lax',
+      httpOnly: true, secure: process.env.NODE_ENV === 'production', sameSite: 'strict',
       maxAge: 30 * 24 * 60 * 60 * 1000,
     });
 
@@ -125,7 +131,7 @@ router.post('/google', async (req, res) => {
     const refreshToken = await signRefreshToken(user.id);
 
     res.cookie('refresh_token', refreshToken, {
-      httpOnly: true, secure: process.env.NODE_ENV === 'production', sameSite: 'lax',
+      httpOnly: true, secure: process.env.NODE_ENV === 'production', sameSite: 'strict',
       maxAge: 30 * 24 * 60 * 60 * 1000,
     });
 
@@ -152,7 +158,7 @@ router.post('/refresh', async (req, res) => {
     const newRefreshToken = await signRefreshToken(user.id);
 
     res.cookie('refresh_token', newRefreshToken, {
-      httpOnly: true, secure: process.env.NODE_ENV === 'production', sameSite: 'lax',
+      httpOnly: true, secure: process.env.NODE_ENV === 'production', sameSite: 'strict',
       maxAge: 30 * 24 * 60 * 60 * 1000,
     });
 

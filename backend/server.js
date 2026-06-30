@@ -10,7 +10,7 @@ const morgan = require('morgan');
 const path = require('path');
 const cookieParser = require('cookie-parser');
 
-require('./src/config/database'); // connect on startup
+require('./src/config/database');
 const initSocket = require('./src/socket');
 
 const authRoutes = require('./src/routes/auth');
@@ -21,15 +21,19 @@ const statusRoutes = require('./src/routes/status');
 
 const app = express();
 const server = http.createServer(app);
+const isProd = process.env.NODE_ENV === 'production';
 
 /* ── CORS origin checker ── */
 function isAllowedOrigin(origin) {
-  if (!origin) return true; // server-to-server / curl
-  if (origin.includes('localhost')) return true;
-  if (origin.endsWith('.vercel.app')) return true;
-  if (origin.endsWith('.onrender.com')) return true;
-  const clientUrl = process.env.CLIENT_URL || '';
+  if (!origin) return true; // server-to-server / health checks
+  const clientUrl = (process.env.CLIENT_URL || '').replace(/\/$/, '');
   if (clientUrl && origin === clientUrl) return true;
+  if (!isProd && origin.includes('localhost')) return true;
+  // Allow Vercel preview deploys for the same project
+  if (clientUrl.includes('vercel.app')) {
+    const baseDomain = clientUrl.replace('https://', '').split('-')[0];
+    if (origin.includes('vercel.app') && origin.includes(baseDomain)) return true;
+  }
   return false;
 }
 
@@ -45,25 +49,40 @@ const io = new Server(server, {
   pingTimeout: 60000,
   pingInterval: 25000,
   transports: ['websocket', 'polling'],
+  maxHttpBufferSize: 1e6, // 1 MB max socket message
 });
 
-/* ── Security ── */
-app.use(helmet({ contentSecurityPolicy: false, crossOriginEmbedderPolicy: false }));
+/* ── Security headers ── */
+app.use(helmet({
+  contentSecurityPolicy: false,     // frontend is on a separate domain
+  crossOriginEmbedderPolicy: false,
+  hsts: isProd ? { maxAge: 31536000, includeSubDomains: true } : false,
+  frameguard: { action: 'deny' },
+  noSniff: true,
+  xssFilter: true,
+  referrerPolicy: { policy: 'strict-origin-when-cross-origin' },
+}));
 app.use(cors(corsOptions));
 app.options('*', cors(corsOptions));
 app.use(cookieParser());
 
+// Remove server fingerprint
+app.disable('x-powered-by');
+
 /* ── Rate Limiting ── */
-const apiLimiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 500, standardHeaders: true, legacyHeaders: false });
-const authLimiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 30, standardHeaders: true, legacyHeaders: false });
+const apiLimiter  = rateLimit({ windowMs: 15 * 60 * 1000, max: 500,  standardHeaders: true, legacyHeaders: false });
+const authLimiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 20,   standardHeaders: true, legacyHeaders: false }); // stricter: 20 auth calls per 15 min
+const uploadLimiter = rateLimit({ windowMs: 60 * 1000,    max: 10,   standardHeaders: true, legacyHeaders: false }); // 10 uploads per minute
 
 app.use('/api/', apiLimiter);
 app.use('/api/auth/', authLimiter);
+app.use('/api/users/upload', uploadLimiter);
+app.use('/api/users/me/avatar', uploadLimiter);
 
-/* ── Middleware ── */
-app.use(express.json({ limit: '10mb' }));
-app.use(express.urlencoded({ extended: true }));
-app.use(morgan('dev'));
+/* ── Body parsing — tight limit for JSON, larger for multipart ── */
+app.use(express.json({ limit: '1mb' }));  // was 10mb — API requests don't need that
+app.use(express.urlencoded({ extended: true, limit: '1mb' }));
+app.use(isProd ? morgan('combined') : morgan('dev'));
 
 /* ── API Routes ── */
 app.use('/api/auth', authRoutes);
@@ -74,32 +93,27 @@ app.use('/api/status', statusRoutes);
 
 app.get('/api/health', (req, res) => res.json({ status: 'ok', ts: new Date().toISOString() }));
 
+/* ── 404 for unknown API routes ── */
+app.use('/api/*', (req, res) => res.status(404).json({ error: 'Not found' }));
+
 /* ── Socket Handler ── */
 initSocket(io);
 
-/* ── Serve Next.js Build ── */
-const clientBuildPath = path.join(__dirname, '../client/.next/server/app');
-const clientPublicPath = path.join(__dirname, '../client/public');
-
-// Serve static files from Next.js public folder
-app.use(express.static(clientPublicPath));
-
-// Fallback: serve from client/out (static export) if present
+/* ── Serve Next.js static build (development fallback) ── */
 const clientOutPath = path.join(__dirname, '../client/out');
 app.use(express.static(clientOutPath));
-
 app.get('*', (req, res) => {
-  const indexPath = path.join(clientOutPath, 'index.html');
   const fs = require('fs');
+  const indexPath = path.join(clientOutPath, 'index.html');
   if (fs.existsSync(indexPath)) {
     res.sendFile(indexPath);
   } else {
-    res.status(200).json({ message: 'ZapChat API running. Start the Next.js dev server on port 3000.' });
+    res.status(200).json({ message: 'ZapChat API running.' });
   }
 });
 
 /* ── Start ── */
 const PORT = process.env.PORT || 10000;
 server.listen(PORT, '0.0.0.0', () => {
-  console.log(`🚀 ZapChat backend running on port ${PORT}`);
+  console.log(`ZapChat backend running on port ${PORT} [${isProd ? 'production' : 'development'}]`);
 });

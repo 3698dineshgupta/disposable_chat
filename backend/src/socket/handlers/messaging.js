@@ -24,11 +24,37 @@ setInterval(async () => {
   }
 }, 60 * 60 * 1000);
 
+/* ── Per-socket rate limiter: max 30 message:send events per 10 seconds ── */
+function makeRateLimiter(maxEvents, windowMs) {
+  const counts = {};
+  return function check(socketId) {
+    const now = Date.now();
+    const entry = counts[socketId] ?? { count: 0, windowStart: now };
+    if (now - entry.windowStart > windowMs) {
+      entry.count = 0;
+      entry.windowStart = now;
+    }
+    entry.count++;
+    counts[socketId] = entry;
+    return entry.count <= maxEvents;
+  };
+}
+
+const msgRateOk = makeRateLimiter(30, 10_000);
+const MAX_PAYLOAD_BYTES = 64 * 1024; // 64 KB encrypted payload limit
+
 module.exports = function handleMessaging(io, socket, onlineUsers) {
   socket.on('message:send', async (data, callback) => {
     try {
+      // Rate limit
+      if (!msgRateOk(socket.id)) return callback?.({ error: 'Too many messages — slow down' });
+
       const { conversationId, recipientId, encryptedPayload, messageType, localId, storagePath } = data;
       if (!conversationId || !encryptedPayload) return callback?.({ error: 'conversationId and encryptedPayload required' });
+
+      // Payload size guard — prevents OOM via oversized encrypted blobs
+      const payloadSize = Buffer.byteLength(JSON.stringify(encryptedPayload), 'utf8');
+      if (payloadSize > MAX_PAYLOAD_BYTES) return callback?.({ error: 'Payload too large' });
 
       const { data: member } = await supabase
         .from('conversation_participants')
@@ -122,7 +148,16 @@ module.exports = function handleMessaging(io, socket, onlineUsers) {
     } catch { callback?.({ error: 'Failed to acknowledge' }); }
   });
 
-  socket.on('conversation:join', ({ conversationId }) => socket.join(`conv:${conversationId}`));
+  socket.on('conversation:join', async ({ conversationId }) => {
+    // Verify the user is actually a participant before allowing room join (prevents IDOR eavesdropping)
+    const { data: member } = await supabase
+      .from('conversation_participants')
+      .select('user_id')
+      .eq('conversation_id', conversationId)
+      .eq('user_id', socket.userId)
+      .single();
+    if (member) socket.join(`conv:${conversationId}`);
+  });
 
   socket.on('message:react', ({ conversationId, localId, emoji }) => {
     socket.to(`conv:${conversationId}`).emit('message:react', { localId, conversationId, userId: socket.userId, emoji });

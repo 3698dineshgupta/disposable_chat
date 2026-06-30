@@ -165,6 +165,9 @@ CREATE INDEX IF NOT EXISTS idx_statuses_expires     ON statuses(expires_at);
 CREATE INDEX IF NOT EXISTS idx_refresh_tokens_user  ON refresh_tokens(user_id);
 CREATE INDEX IF NOT EXISTS idx_refresh_tokens_exp   ON refresh_tokens(expires_at);
 CREATE INDEX IF NOT EXISTS idx_contacts_user        ON contacts(user_id);
+CREATE INDEX IF NOT EXISTS idx_pm_local_id          ON pending_messages(local_id);
+CREATE INDEX IF NOT EXISTS idx_rt_token_hash        ON refresh_tokens(token_hash);
+CREATE INDEX IF NOT EXISTS idx_pm_recipient_created ON pending_messages(recipient_id, created_at);
 
 -- ============================================================
 -- AUTO-UPDATE TIMESTAMP TRIGGER

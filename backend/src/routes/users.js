@@ -1,7 +1,7 @@
 const express = require('express');
 const { supabase } = require('../config/database');
 const { authenticate } = require('../middleware/auth');
-const { upload } = require('../middleware/upload');
+const { upload, safeExtension } = require('../middleware/upload');
 
 const router = express.Router();
 const SAFE_COLS = 'id, username, display_name, avatar_url, about, is_online, last_seen, public_key, signing_public_key';
@@ -11,11 +11,14 @@ router.get('/search', authenticate, async (req, res) => {
   try {
     const { q } = req.query;
     if (!q || q.length < 2) return res.json({ users: [] });
+    // Sanitize: only allow alphanumeric, spaces, @, ., _ — prevents PostgREST filter injection
+    const safe = String(q).replace(/[^a-zA-Z0-9 @._-]/g, '').slice(0, 50);
+    if (safe.length < 2) return res.json({ users: [] });
 
     const { data, error } = await supabase
       .from('users')
       .select(SAFE_COLS)
-      .or(`username.ilike.%${q}%,display_name.ilike.%${q}%,email.ilike.%${q}%`)
+      .or(`username.ilike.%${safe}%,display_name.ilike.%${safe}%,email.ilike.%${safe}%`)
       .neq('id', req.user.id)
       .limit(20);
 
@@ -48,8 +51,12 @@ router.put('/me/profile', authenticate, async (req, res) => {
     const { display_name, about, username } = req.body;
     const updates = {};
 
-    if (display_name) updates.display_name = display_name.trim();
-    if (about !== undefined) updates.about = about;
+    if (display_name) {
+      if (typeof display_name !== 'string' || display_name.trim().length > 100)
+        return res.status(400).json({ error: 'display_name must be ≤ 100 characters' });
+      updates.display_name = display_name.trim().slice(0, 100);
+    }
+    if (about !== undefined) updates.about = String(about).slice(0, 500);
     if (username) {
       const { data: taken } = await supabase.from('users').select('id').eq('username', username.toLowerCase()).neq('id', req.user.id).single();
       if (taken) return res.status(409).json({ error: 'Username taken' });
@@ -76,9 +83,11 @@ router.put('/me/profile', authenticate, async (req, res) => {
 router.post('/me/avatar', authenticate, upload.single('avatar'), async (req, res) => {
   try {
     if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
+    // Only allow image types for avatars
+    if (!req.file.mimetype.startsWith('image/')) return res.status(400).json({ error: 'Only image files allowed for avatar' });
 
     let avatarUrl;
-    const ext = req.file.mimetype.split('/')[1];
+    const ext = safeExtension(req.file.mimetype); // derive from MIME, never from filename
     const filename = `avatars/${req.user.id}.${ext}`;
 
     const { error: upErr } = await supabase.storage.from('media').upload(filename, req.file.buffer, {
@@ -104,8 +113,7 @@ router.post('/upload', authenticate, upload.single('file'), async (req, res) => 
   try {
     if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
     const { randomUUID } = require('crypto');
-    const ext = req.file.originalname.split('.').pop();
-    // Store under temp/ prefix so we can identify and purge ephemeral files
+    const ext = safeExtension(req.file.mimetype); // never trust client filename
     const storagePath = `temp/${randomUUID()}.${ext}`;
 
     const { error: upErr } = await supabase.storage.from('media').upload(storagePath, req.file.buffer, { contentType: req.file.mimetype });

@@ -2,23 +2,29 @@ const multer = require('multer');
 const path = require('path');
 const crypto = require('crypto');
 
-const ALLOWED_TYPES = [
-  'image/jpeg', 'image/png', 'image/gif', 'image/webp', 'image/svg+xml',
-  'video/mp4', 'video/webm', 'video/ogg',
-  'audio/mpeg', 'audio/ogg', 'audio/wav', 'audio/webm',
-  'application/pdf',
-  'application/zip', 'application/x-zip-compressed',
-  'application/msword',
-  'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
-  'application/vnd.ms-excel',
-  'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-  'text/plain',
-];
+// SVG excluded — can contain <script> tags (stored XSS)
+const ALLOWED_TYPES = {
+  'image/jpeg':       'jpg',
+  'image/png':        'png',
+  'image/gif':        'gif',
+  'image/webp':       'webp',
+  'video/mp4':        'mp4',
+  'video/webm':       'webm',
+  'audio/mpeg':       'mp3',
+  'audio/ogg':        'ogg',
+  'audio/wav':        'wav',
+  'audio/webm':       'webm',
+  'application/pdf':  'pdf',
+  'text/plain':       'txt',
+};
+
+// Derive safe extension from MIME type — never trust client-supplied filename
+const safeExtension = (mimetype) => ALLOWED_TYPES[mimetype] ?? 'bin';
 
 const storage = multer.memoryStorage();
 
 const fileFilter = (req, file, cb) => {
-  if (ALLOWED_TYPES.includes(file.mimetype)) {
+  if (ALLOWED_TYPES[file.mimetype]) {
     cb(null, true);
   } else {
     cb(new Error(`File type not allowed: ${file.mimetype}`), false);
@@ -28,7 +34,7 @@ const fileFilter = (req, file, cb) => {
 const upload = multer({
   storage,
   fileFilter,
-  limits: { fileSize: 100 * 1024 * 1024 }, // 100 MB
+  limits: { fileSize: 25 * 1024 * 1024 }, // 25 MB
 });
 
-module.exports = { upload };
+module.exports = { upload, safeExtension };
