@@ -137,6 +137,16 @@ export function useMessages(
       return await decryptMessage(sharedSecret, payload.ciphertext, payload.iv);
     } catch (err) {
       console.warn('[decrypt failed — key mismatch or corrupted payload]', (err as Error)?.message ?? err);
+      // Show a brief diagnostic toast so we can distinguish "message arrived but
+      // couldn't decrypt" from "message never arrived". Shown only in dev or when
+      // explicitly needed; won't spam the user because it fires once per message.
+      import('react-hot-toast').then(({ default: toast }) => {
+        toast('Message received but could not decrypt — refreshing keys…', {
+          id: 'decrypt-fail', // deduplicate: only one toast visible at a time
+          icon: '🔑',
+          duration: 4000,
+        });
+      }).catch(() => {});
       return null;
     }
   }, [cryptoCtx]);
@@ -295,10 +305,11 @@ export function useMessages(
       // other_public_key before we attempt decryption again.
       if (retryMessages.length > 0) {
         onKeyMismatch?.(); // invalidates conversation query → fresh other_public_key
-        // 1.5 s delay: enough time for the refetch to complete on a slow connection
+        // 3 s delay: gives the conversation refetch time to return a new key
+        // even on slow mobile connections before we attempt decryption again.
         setTimeout(() => {
           useChatStore.getState().queueIncoming(retryMessages);
-        }, 1500);
+        }, 3000);
       }
 
       await markAllSeenInConv();

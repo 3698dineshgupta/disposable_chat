@@ -57,9 +57,11 @@ export default function ChatWindow({ conversationId }: Props) {
       conversation: r.data.conversation as Conversation,
       participants: r.data.participants as ConversationParticipant[],
     })),
-    staleTime: missingTheirKey ? 0 : 15_000, // 15s so key changes propagate quickly
-    refetchInterval: missingTheirKey ? 5_000 : false,
-    refetchOnMount: 'always', // always fetch fresh data on open (catches key rotation)
+    staleTime: missingTheirKey ? 0 : 15_000,
+    // Poll every 5s until we have the peer's key, then every 30s to pick up key
+    // rotations (e.g. peer just connected from a new device / VPN session).
+    refetchInterval: missingTheirKey ? 5_000 : 30_000,
+    refetchOnMount: 'always',
     refetchOnWindowFocus: true,
   });
 
