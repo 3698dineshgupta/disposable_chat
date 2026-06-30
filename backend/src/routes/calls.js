@@ -1,40 +1,91 @@
 const express = require('express');
+const https = require('https');
 const { supabase } = require('../config/database');
 const { authenticate } = require('../middleware/auth');
 
 const router = express.Router();
 
-/* ── ICE server credentials for WebRTC ── */
-router.get('/ice-servers', authenticate, (req, res) => {
-  const servers = [
-    { urls: 'stun:stun.l.google.com:19302' },
-    { urls: 'stun:stun1.l.google.com:19302' },
-    { urls: 'stun:stun2.l.google.com:19302' },
-    { urls: 'stun:stun3.l.google.com:19302' },
-  ];
+/* ── Metered.ca credentials cache (TTL = 1 hour) ── */
+let _meteredCache = null;
+let _meteredCacheAt = 0;
+const METERED_CACHE_TTL = 60 * 60 * 1000; // 1 hour
 
-  // Add TURN server(s) if configured via environment variables.
-  // Set TURN_URLS (comma-separated), TURN_USERNAME, TURN_CREDENTIAL in backend .env
-  if (process.env.TURN_URLS) {
-    const urls = process.env.TURN_URLS.split(',').map(u => u.trim()).filter(Boolean);
-    servers.push({
-      urls,
-      username:   process.env.TURN_USERNAME   || '',
-      credential: process.env.TURN_CREDENTIAL || '',
+async function fetchMeteredServers() {
+  const domain = process.env.METERED_DOMAIN;
+  const apiKey = process.env.METERED_API_KEY;
+  if (!domain || !apiKey) return [];
+
+  // Return cached result if still fresh
+  if (_meteredCache && Date.now() - _meteredCacheAt < METERED_CACHE_TTL) {
+    return _meteredCache;
+  }
+
+  return new Promise((resolve) => {
+    const url = `https://${domain}/api/v1/turn/credentials?apiKey=${apiKey}`;
+    https.get(url, (res) => {
+      let body = '';
+      res.on('data', chunk => { body += chunk; });
+      res.on('end', () => {
+        try {
+          const servers = JSON.parse(body);
+          if (Array.isArray(servers) && servers.length > 0) {
+            _meteredCache  = servers;
+            _meteredCacheAt = Date.now();
+            console.log(`[ICE] fetched ${servers.length} Metered.ca servers`);
+            resolve(servers);
+          } else {
+            console.warn('[ICE] Metered.ca returned empty/invalid response');
+            resolve([]);
+          }
+        } catch (e) {
+          console.warn('[ICE] Metered.ca parse error:', e.message);
+          resolve([]);
+        }
+      });
+    }).on('error', (e) => {
+      console.warn('[ICE] Metered.ca fetch error:', e.message);
+      // Return stale cache if available rather than failing completely
+      resolve(_meteredCache || []);
+    });
+  });
+}
+
+/* ── ICE server credentials for WebRTC ── */
+router.get('/ice-servers', authenticate, async (req, res) => {
+  try {
+    // Always include multiple Google STUN servers as base
+    const servers = [
+      { urls: 'stun:stun.l.google.com:19302' },
+      { urls: 'stun:stun1.l.google.com:19302' },
+      { urls: 'stun:stun2.l.google.com:19302' },
+      { urls: 'stun:stun3.l.google.com:19302' },
+    ];
+
+    // Metered.ca TURN — fetches short-lived credentials from their API
+    const meteredServers = await fetchMeteredServers();
+    servers.push(...meteredServers);
+
+    // Manual TURN override (takes priority if both are set)
+    if (process.env.TURN_URLS) {
+      const urls = process.env.TURN_URLS.split(',').map(u => u.trim()).filter(Boolean);
+      servers.push({
+        urls,
+        username:   process.env.TURN_USERNAME   || '',
+        credential: process.env.TURN_CREDENTIAL || '',
+      });
+    }
+
+    res.json({ iceServers: servers });
+  } catch (err) {
+    console.error('[ICE] ice-servers error:', err.message);
+    // Fallback: return STUN-only so calls still work on same-network
+    res.json({
+      iceServers: [
+        { urls: 'stun:stun.l.google.com:19302' },
+        { urls: 'stun:stun1.l.google.com:19302' },
+      ],
     });
   }
-
-  // Metered.ca free TURN (set METERED_API_KEY env var to enable)
-  if (process.env.METERED_API_KEY) {
-    servers.push(
-      { urls: `turn:a.relay.metered.ca:80`,     username: process.env.METERED_USERNAME || '', credential: process.env.METERED_CREDENTIAL || '' },
-      { urls: `turn:a.relay.metered.ca:80?transport=tcp`, username: process.env.METERED_USERNAME || '', credential: process.env.METERED_CREDENTIAL || '' },
-      { urls: `turn:a.relay.metered.ca:443`,    username: process.env.METERED_USERNAME || '', credential: process.env.METERED_CREDENTIAL || '' },
-      { urls: `turns:a.relay.metered.ca:443?transport=tcp`, username: process.env.METERED_USERNAME || '', credential: process.env.METERED_CREDENTIAL || '' },
-    );
-  }
-
-  res.json({ iceServers: servers });
 });
 
 /* ── Get call history ── */
