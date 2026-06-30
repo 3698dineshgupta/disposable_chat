@@ -22,29 +22,30 @@ async function fetchMeteredServers() {
 
   return new Promise((resolve) => {
     const url = `https://${domain}/api/v1/turn/credentials?apiKey=${apiKey}`;
+    console.log(`[ICE] fetching Metered.ca credentials from: ${url}`);
     https.get(url, (res) => {
       let body = '';
       res.on('data', chunk => { body += chunk; });
       res.on('end', () => {
+        console.log(`[ICE] Metered.ca HTTP ${res.statusCode}, body[0..200]: ${body.substring(0, 200)}`);
         try {
           const servers = JSON.parse(body);
           if (Array.isArray(servers) && servers.length > 0) {
             _meteredCache  = servers;
             _meteredCacheAt = Date.now();
-            console.log(`[ICE] fetched ${servers.length} Metered.ca servers`);
+            console.log(`[ICE] fetched ${servers.length} Metered.ca servers (TURN count: ${servers.filter(s => String(s.urls || s.url || '').startsWith('turn:')).length})`);
             resolve(servers);
           } else {
-            console.warn('[ICE] Metered.ca returned empty/invalid response');
+            console.warn('[ICE] Metered.ca returned empty/invalid array — check domain and API key in Render env vars');
             resolve([]);
           }
         } catch (e) {
-          console.warn('[ICE] Metered.ca parse error:', e.message);
+          console.warn('[ICE] Metered.ca parse error:', e.message, '| raw:', body.substring(0, 100));
           resolve([]);
         }
       });
     }).on('error', (e) => {
       console.warn('[ICE] Metered.ca fetch error:', e.message);
-      // Return stale cache if available rather than failing completely
       resolve(_meteredCache || []);
     });
   });

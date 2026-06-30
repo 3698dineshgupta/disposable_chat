@@ -95,7 +95,12 @@ module.exports = function handleMessaging(io, socket, onlineUsers) {
 
       if (recipientId) {
         // Save to pending regardless of online status — cleaned up by message:seen
-        supabase.from('pending_messages').insert({ ...pendingBase, recipient_id: recipientId }).catch(() => {});
+        // NOTE: supabase-js v2 query builder is PromiseLike (has .then) but NOT a full
+        // Promise (no .catch). Calling .catch() directly throws TypeError. Must use
+        // .then(...).catch(...) or Promise.resolve(...).catch(...).
+        Promise.resolve(
+          supabase.from('pending_messages').insert({ ...pendingBase, recipient_id: recipientId })
+        ).catch(() => {});
 
         const isOnline = onlineUsers.has(recipientId);
         if (isOnline) {
@@ -117,7 +122,9 @@ module.exports = function handleMessaging(io, socket, onlineUsers) {
           .neq('user_id', socket.userId);
 
         for (const m of members || []) {
-          supabase.from('pending_messages').insert({ ...pendingBase, recipient_id: m.user_id }).catch(() => {});
+          Promise.resolve(
+            supabase.from('pending_messages').insert({ ...pendingBase, recipient_id: m.user_id })
+          ).catch(() => {});
           if (onlineUsers.has(m.user_id)) {
             io.to(`user:${m.user_id}`).emit('message:receive', messageEvent);
           } else {
