@@ -1,11 +1,11 @@
 'use client';
 
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
 import { Search, X } from 'lucide-react';
 import { useAuthStore } from '@/store/auth';
 import { useChatStore } from '@/store/chat';
 import { conversationsApi } from '@/lib/api';
-import { useQuery } from '@tanstack/react-query';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   generateKeyPair, generateSigningKeys, exportPublicKey, exportSigningPublicKey,
   importPublicKey, importSigningPublicKey, loadKeyPair, persistKeyPair,
@@ -13,6 +13,11 @@ import {
 import { storeKey, retrieveKey } from '@/lib/db/index';
 import { authApi } from '@/lib/api';
 import { joinConversationRoom } from '@/lib/socket';
+
+// Session-scoped flag: tracks whether we've uploaded our public keys to the server
+// this page session. Reset on every page reload. Prevents redundant PUT /auth/keys
+// calls when multiple ChatWindows open within the same session.
+let _keysUploadedThisSession = false;
 import { useMessages } from '@/hooks/useMessages';
 import type { Conversation, LocalMessage, MessageType, ConversationParticipant } from '@/types';
 import ChatHeader from './ChatHeader';
@@ -27,6 +32,7 @@ interface Props {
 export default function ChatWindow({ conversationId }: Props) {
   const { user } = useAuthStore();
   const { setReplyingTo, replyingTo } = useChatStore();
+  const queryClient = useQueryClient();
   const [showSearch, setShowSearch] = useState(false);
   const [searchText, setSearchText] = useState('');
   const [searchResults, setSearchResults] = useState<LocalMessage[]>([]);
@@ -51,8 +57,10 @@ export default function ChatWindow({ conversationId }: Props) {
       conversation: r.data.conversation as Conversation,
       participants: r.data.participants as ConversationParticipant[],
     })),
-    staleTime: missingTheirKey ? 0 : 60_000,
+    staleTime: missingTheirKey ? 0 : 15_000, // 15s so key changes propagate quickly
     refetchInterval: missingTheirKey ? 5_000 : false,
+    refetchOnMount: 'always', // always fetch fresh data on open (catches key rotation)
+    refetchOnWindowFocus: true,
   });
 
   useEffect(() => {
@@ -87,12 +95,24 @@ export default function ChatWindow({ conversationId }: Props) {
       /* Load or generate my key pair */
       let loaded = await loadKeyPair(retrieveKey);
       if (!loaded) {
+        // First time: generate, persist, and upload to server
         const kp = await generateKeyPair();
         const sp = await generateSigningKeys();
         const { publicKeyRaw, signingPublicKeyRaw } = await persistKeyPair(kp, sp, storeKey);
         loaded = { keyPair: kp, signingKeyPair: sp };
-        /* Register keys on server */
         await authApi.updateKeys(publicKeyRaw, signingPublicKeyRaw);
+        _keysUploadedThisSession = true;
+      } else if (!_keysUploadedThisSession) {
+        // Keys exist in IndexedDB but haven't been pushed to the server yet this
+        // session. This covers: (a) first upload failed due to a network error,
+        // (b) the user is on a new device that had IndexedDB from a previous
+        // install, (c) the server DB was reset. Non-blocking — setCryptoCtx runs
+        // even if the upload fails (local keys are still usable for sending).
+        const publicKeyRaw = await exportPublicKey(loaded.keyPair.publicKey);
+        const signingPublicKeyRaw = await exportSigningPublicKey(loaded.signingKeyPair.publicKey);
+        authApi.updateKeys(publicKeyRaw, signingPublicKeyRaw)
+          .catch((err) => console.warn('[E2EE] key sync to server failed:', err?.message));
+        _keysUploadedThisSession = true;
       }
 
       setCryptoCtx({
@@ -106,7 +126,13 @@ export default function ChatWindow({ conversationId }: Props) {
     setup().catch(console.error);
   }, [user, conversation?.id, conversation?.other_public_key]);
 
-  const { messages, isLoading, hasMore, loadMore, sendMessage } = useMessages(conversation, cryptoCtx);
+  // When decryption fails (key mismatch), invalidate the conversation query so
+  // React Query re-fetches the latest other_public_key before the next retry.
+  const onKeyMismatch = useCallback(() => {
+    queryClient.invalidateQueries({ queryKey: ['conversation', conversationId] });
+  }, [queryClient, conversationId]);
+
+  const { messages, isLoading, hasMore, loadMore, sendMessage } = useMessages(conversation, cryptoCtx, onKeyMismatch);
 
   /* Search */
   useEffect(() => {

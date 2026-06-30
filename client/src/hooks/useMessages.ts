@@ -27,7 +27,11 @@ interface CryptoContext {
   theirSigningPublicKeyB64: string | null;
 }
 
-export function useMessages(conversation: Conversation | null, cryptoCtx: CryptoContext) {
+export function useMessages(
+  conversation: Conversation | null,
+  cryptoCtx: CryptoContext,
+  onKeyMismatch?: () => void,
+) {
   const { user } = useAuthStore();
   const { addMessage, updateMessage, setMessages, messages } = useChatStore();
   const [isLoading, setIsLoading] = useState(false);
@@ -223,17 +227,37 @@ export function useMessages(conversation: Conversation | null, cryptoCtx: Crypto
     const processQueue = async () => {
       const socket = getSocket();
       const idsToAck: string[] = [];
+      const retryMessages: (typeof queued[number])[] = [];
 
       for (const m of queued) {
-        // Always acknowledge the DB row — even if we can't decrypt, clean it up
-        if (m.pendingDbId) idsToAck.push(m.pendingDbId);
-
-        if (m.senderId === user.id) continue;
-        if (m.localId && processingRef.current.has(m.localId)) continue;
+        if (m.senderId === user.id) {
+          // Own messages echoed back (e.g. pending_messages): just ack
+          if (m.pendingDbId) idsToAck.push(m.pendingDbId);
+          continue;
+        }
+        if (m.localId && processingRef.current.has(m.localId)) {
+          // Already processed: ack and skip
+          if (m.pendingDbId) idsToAck.push(m.pendingDbId);
+          continue;
+        }
 
         const decrypted = await decryptPayload(m.encryptedPayload, m.senderId);
-        if (!decrypted) continue; // key mismatch — skip
+        if (!decrypted) {
+          // Decryption failed — the sender's key may have just rotated.
+          // Re-queue (max 3 retries) and trigger a conversation refetch
+          // to pick up the latest other_public_key before the next attempt.
+          const retries = m.retryCount ?? 0;
+          if (retries < 3) {
+            retryMessages.push({ ...m, retryCount: retries + 1 });
+          } else {
+            // Give up after 3 retries — ack to clean up the DB row
+            if (m.pendingDbId) idsToAck.push(m.pendingDbId);
+            console.warn('[decrypt] giving up after 3 retries, localId=', m.localId);
+          }
+          continue;
+        }
 
+        if (m.pendingDbId) idsToAck.push(m.pendingDbId);
         // Re-check after async gap before marking (messageBus may have raced us)
         if (m.localId && processingRef.current.has(m.localId)) continue;
         if (m.localId) processingRef.current.add(m.localId);
@@ -264,6 +288,17 @@ export function useMessages(conversation: Conversation | null, cryptoCtx: Crypto
 
       if (idsToAck.length > 0) {
         socket?.emit('messages:acknowledge', { messageIds: idsToAck });
+      }
+
+      // Re-queue messages that failed to decrypt — but delay so the conversation
+      // refetch (triggered by onKeyMismatch) has time to return the new
+      // other_public_key before we attempt decryption again.
+      if (retryMessages.length > 0) {
+        onKeyMismatch?.(); // invalidates conversation query → fresh other_public_key
+        // 1.5 s delay: enough time for the refetch to complete on a slow connection
+        setTimeout(() => {
+          useChatStore.getState().queueIncoming(retryMessages);
+        }, 1500);
       }
 
       await markAllSeenInConv();

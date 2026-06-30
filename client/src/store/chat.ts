@@ -13,6 +13,7 @@ export interface RawIncoming {
   localId?: string;
   timestamp: string;
   pendingDbId?: string; // set for messages:pending rows needing acknowledgement
+  retryCount?: number;  // incremented on each failed decryption attempt
 }
 
 interface ChatState {
