@@ -11,13 +11,14 @@ let _meteredCacheAt = 0;
 const METERED_CACHE_TTL = 5 * 60 * 1000; // 5 minutes
 
 /* ── Public TURN fallback ────────────────────────────────────────────────────
- * Used when Metered.ca credentials are missing/empty AND TURN_URLS is not set.
- * openrelay.metered.ca is Metered.ca's public demo relay — free, rate-limited,
- * suitable for testing/small deployments. Replace with a private TURN server
- * for production traffic.
+ * Used when private TURN (Metered.ca app or TURN_URLS env var) is not set.
+ * Multiple providers are listed so if one is unreachable from a given network
+ * (blocked ports, firewall, geographic routing), another will succeed.
+ * These are all free/demo servers — configure METERED_DOMAIN + METERED_API_KEY
+ * on Render for a private relay with guaranteed uptime.
  * ─────────────────────────────────────────────────────────────────────────── */
 const PUBLIC_TURN_FALLBACK = [
-  { urls: 'stun:openrelay.metered.ca:80' },
+  // Provider 1: Metered.ca public relay (ports 80, 443, TCP, TLS)
   {
     urls: [
       'turn:openrelay.metered.ca:80',
@@ -27,6 +28,21 @@ const PUBLIC_TURN_FALLBACK = [
     ],
     username:   'openrelayproject',
     credential: 'openrelayproject',
+  },
+  // Provider 2: FreeTURN — independent server, different network path
+  {
+    urls: [
+      'turn:freeturn.net:3478',
+      'turns:freeturn.net:5349',
+    ],
+    username:   'free',
+    credential: 'free',
+  },
+  // Provider 3: numb.viagenie.ca — long-running public TURN
+  {
+    urls: 'turn:numb.viagenie.ca',
+    username:   'webrtc@live.com',
+    credential: 'muazkh',
   },
 ];
 

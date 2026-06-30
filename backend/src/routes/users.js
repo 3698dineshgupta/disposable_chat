@@ -117,18 +117,16 @@ router.post('/upload', authenticate, upload.single('file'), async (req, res) => 
     const storagePath = `temp/${randomUUID()}.${ext}`;
 
     const { error: upErr } = await supabase.storage.from('media').upload(storagePath, req.file.buffer, { contentType: req.file.mimetype });
-    let fileUrl;
-    if (!upErr) {
-      const { data: pub } = supabase.storage.from('media').getPublicUrl(storagePath);
-      fileUrl = pub.publicUrl;
-    } else {
-      // Fallback: send as data-URI (no storage path needed — nothing to delete)
-      fileUrl = `data:${req.file.mimetype};base64,${req.file.buffer.toString('base64')}`;
+    if (upErr) {
+      // Do NOT fall back to a base64 data-URI — a typical image is 1-5 MB which
+      // would exceed the 64 KB socket payload limit and cause "Payload too large".
+      // Instead, surface the real error so it can be fixed (usually a missing bucket).
+      console.error('[upload] Supabase Storage error:', upErr.message, '| bucket: media | path:', storagePath);
+      return res.status(500).json({ error: `Storage upload failed: ${upErr.message}` });
     }
 
-    // storagePath is null for data-URI fallback (no file to clean up)
-    const sp = upErr ? null : storagePath;
-    res.json({ url: fileUrl, storagePath: sp, name: req.file.originalname, size: req.file.size, type: req.file.mimetype });
+    const { data: pub } = supabase.storage.from('media').getPublicUrl(storagePath);
+    res.json({ url: pub.publicUrl, storagePath, name: req.file.originalname, size: req.file.size, type: req.file.mimetype });
   } catch (err) {
     res.status(500).json({ error: 'Upload failed' });
   }

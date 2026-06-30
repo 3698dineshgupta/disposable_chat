@@ -1,4 +1,25 @@
 const { Pool } = require('pg');
+const { supabase } = require('../config/database');
+
+async function ensureStorageBucket() {
+  // Create the 'media' bucket if it doesn't exist. Without this bucket,
+  // all media uploads fall through to the (removed) data-URI fallback
+  // which bloats socket payloads beyond the 64 KB limit.
+  try {
+    const { error } = await supabase.storage.createBucket('media', {
+      public: true,
+      fileSizeLimit: 52428800, // 50 MB per file
+      allowedMimeTypes: ['image/*', 'video/*', 'audio/*', 'application/*', 'text/*'],
+    });
+    if (!error || error.message?.includes('already exists') || error.message?.includes('Duplicate')) {
+      console.log('[Storage] media bucket ready.');
+    } else {
+      console.warn('[Storage] createBucket warning:', error.message);
+    }
+  } catch (err) {
+    console.warn('[Storage] bucket init skipped:', err.message);
+  }
+}
 
 async function runAIMigration() {
   if (!process.env.DATABASE_URL) return;
@@ -90,4 +111,7 @@ async function runAIMigration() {
   }
 }
 
-module.exports = runAIMigration;
+module.exports = async function runAll() {
+  await ensureStorageBucket();
+  await runAIMigration();
+};
