@@ -14,7 +14,7 @@ router.get('/', authenticate, async (req, res) => {
         conversations!conversation_id(id, type, name, avatar_url, description, created_by, updated_at)
       `)
       .eq('user_id', req.user.id)
-      .eq('is_archived', false)
+      .or('is_archived.eq.false,is_archived.is.null')
       .order('conversations(updated_at)', { ascending: false });
 
     if (error) throw error;

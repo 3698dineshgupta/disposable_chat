@@ -2,19 +2,28 @@ const { Pool } = require('pg');
 const { supabase } = require('../config/database');
 
 async function ensureStorageBucket() {
-  // Create the 'media' bucket if it doesn't exist. Without this bucket,
-  // all media uploads fall through to the (removed) data-URI fallback
-  // which bloats socket payloads beyond the 64 KB limit.
+  const BUCKET_OPTS = {
+    public: true,
+    fileSizeLimit: 52428800, // 50 MB per file
+    allowedMimeTypes: ['image/*', 'video/*', 'audio/*', 'application/*', 'text/*'],
+  };
   try {
-    const { error } = await supabase.storage.createBucket('media', {
-      public: true,
-      fileSizeLimit: 52428800, // 50 MB per file
-      allowedMimeTypes: ['image/*', 'video/*', 'audio/*', 'application/*', 'text/*'],
-    });
-    if (!error || error.message?.includes('already exists') || error.message?.includes('Duplicate')) {
-      console.log('[Storage] media bucket ready.');
+    const { error } = await supabase.storage.createBucket('media', BUCKET_OPTS);
+    if (!error) {
+      console.log('[Storage] media bucket created and set to public.');
+      return;
+    }
+    // Bucket already exists — ensure it is public regardless of how it was originally created.
+    // A previously-private bucket causes all public URLs to return 400/403.
+    if (error.message?.toLowerCase().includes('already exists') || error.message?.includes('Duplicate')) {
+      const { error: upErr } = await supabase.storage.updateBucket('media', BUCKET_OPTS);
+      if (upErr) {
+        console.warn('[Storage] updateBucket warning:', upErr.message);
+      } else {
+        console.log('[Storage] media bucket already existed — confirmed public.');
+      }
     } else {
-      console.warn('[Storage] createBucket warning:', error.message);
+      console.warn('[Storage] createBucket unexpected error:', error.message);
     }
   } catch (err) {
     console.warn('[Storage] bucket init skipped:', err.message);

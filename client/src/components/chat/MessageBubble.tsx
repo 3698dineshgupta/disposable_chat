@@ -143,15 +143,8 @@ export default function MessageBubble({ msg, isConsecutive, onReply, onDelete, o
             ) : (
               <>
                 {/* Image */}
-                {msg.mediaUrl && isImageUrl(msg.mediaUrl) && (
-                  <div style={{ borderRadius: 8, overflow: 'hidden', maxWidth: 280 }}>
-                    <img src={msg.mediaUrl} alt={msg.fileName || 'Image'} style={{ width: '100%', maxHeight: 280, objectFit: 'cover', display: 'block' }} />
-                    {msg.text && (
-                      <div style={{ padding: '6px 10px 4px', fontSize: 14, color: textColor, lineHeight: 1.5 }}>
-                        {msg.text}
-                      </div>
-                    )}
-                  </div>
+                {msg.mediaUrl && (msg.type === 'image' || isImageUrl(msg.mediaUrl)) && (
+                  <ImageBubble src={msg.mediaUrl} fileName={msg.fileName} text={msg.text} textColor={textColor} />
                 )}
 
                 {/* Video */}
@@ -264,6 +257,40 @@ export default function MessageBubble({ msg, isConsecutive, onReply, onDelete, o
               }}>Cancel</button>
             </div>
           </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ImageBubble({ src, fileName, text, textColor }: { src: string; fileName?: string | null; text?: string; textColor: string }) {
+  const [failed, setFailed] = useState(false);
+  if (failed) {
+    return (
+      <a href={src} target="_blank" rel="noreferrer" download={fileName ?? 'image'}
+        style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '8px 10px 4px', textDecoration: 'none', minWidth: 200 }}>
+        <div style={{ width: 40, height: 40, borderRadius: 10, background: 'rgba(0,168,132,0.12)', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
+          <Download size={20} color="#00a884" />
+        </div>
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <p style={{ margin: 0, fontSize: 13, fontWeight: 500, color: textColor, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{fileName || 'Image'}</p>
+          <p style={{ margin: 0, fontSize: 11, color: 'rgba(128,128,128,0.8)' }}>Tap to open</p>
+        </div>
+        <Download size={16} color="rgba(128,128,128,0.6)" />
+      </a>
+    );
+  }
+  return (
+    <div style={{ borderRadius: 8, overflow: 'hidden', maxWidth: 280 }}>
+      <img
+        src={src}
+        alt={fileName || 'Image'}
+        onError={() => setFailed(true)}
+        style={{ width: '100%', maxHeight: 280, objectFit: 'cover', display: 'block' }}
+      />
+      {text && (
+        <div style={{ padding: '6px 10px 4px', fontSize: 14, color: textColor, lineHeight: 1.5 }}>
+          {text}
         </div>
       )}
     </div>
