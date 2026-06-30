@@ -204,6 +204,24 @@ export interface IncomingCall {
   offer: RTCSessionDescriptionInit;
 }
 
+/* ── AI Auto-Reply ── */
+export interface WritingStyleProfile {
+  tone?: string;
+  avg_message_length?: number;
+  uses_emoji?: boolean;
+  emoji_frequency?: string;
+  capitalization?: string;
+  uses_slang?: boolean;
+  common_phrases?: string[];
+  sample_messages?: string[];
+  language_notes?: string;
+  analyzed_count?: number;
+}
+
+export interface AIConversationSettings {
+  auto_reply_enabled: boolean;
+}
+
 /* ── API responses ── */
 export interface AuthResponse {
   user: User;

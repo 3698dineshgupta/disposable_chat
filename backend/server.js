@@ -18,6 +18,7 @@ const usersRoutes = require('./src/routes/users');
 const conversationsRoutes = require('./src/routes/conversations');
 const callsRoutes = require('./src/routes/calls');
 const statusRoutes = require('./src/routes/status');
+const aiRoutes = require('./src/routes/ai');
 
 const app = express();
 const server = http.createServer(app);
@@ -90,6 +91,7 @@ app.use('/api/users', usersRoutes);
 app.use('/api/conversations', conversationsRoutes);
 app.use('/api/calls', callsRoutes);
 app.use('/api/status', statusRoutes);
+app.use('/api/ai', aiRoutes);
 
 app.get('/api/health', (req, res) => res.json({ status: 'ok', ts: new Date().toISOString() }));
 

@@ -145,6 +145,33 @@ export const callsApi = {
     api.put(`/calls/${id}`, data),
 };
 
+/* ── AI Auto-Reply ── */
+export const aiApi = {
+  /** Generate an AI reply (plaintext in, plaintext out) */
+  generate: (data: {
+    conversationId: string;
+    incomingMessage: string;
+    recentMessages: Array<{ role: 'user' | 'assistant'; content: string }>;
+    conversationSummary?: string;
+  }) => api.post('/ai/generate', data),
+
+  /** Get AI settings for a conversation */
+  getSettings: (convId: string) =>
+    api.get(`/ai/settings/${convId}`),
+
+  /** Enable or disable auto-reply for a conversation */
+  setAutoReply: (convId: string, enabled: boolean) =>
+    api.put(`/ai/settings/${convId}`, { auto_reply_enabled: enabled }),
+
+  /** Get the user's writing style profile */
+  getStyleProfile: () =>
+    api.get('/ai/style'),
+
+  /** Submit a batch of the user's own messages to update the style profile */
+  updateStyleProfile: (messages: string[]) =>
+    api.post('/ai/style', { messages }),
+};
+
 /* ── Status ── */
 export const statusApi = {
   list: () =>

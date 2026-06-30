@@ -1,4 +1,5 @@
 const { supabase } = require('../../config/database');
+const { notifyNewMessage } = require('../../services/push/PushService');
 
 /*
  * In-memory tracker: localId -> { storagePath, uploadedAt }
@@ -81,8 +82,18 @@ module.exports = function handleMessaging(io, socket, onlineUsers) {
       const pendingBase = { conversation_id: conversationId, sender_id: socket.userId, encrypted_payload: encryptedPayload, message_type: messageType || 'text', local_id: localId };
 
       if (recipientId) {
-        if (!onlineUsers.has(recipientId)) {
+        const isOffline = !onlineUsers.has(recipientId);
+        if (isOffline) {
           await supabase.from('pending_messages').insert({ ...pendingBase, recipient_id: recipientId });
+        }
+        // Send push notification for offline recipients
+        if (isOffline) {
+          notifyNewMessage({
+            recipientId,
+            senderName: socket.user?.display_name || 'Someone',
+            conversationId,
+            isGroup: false,
+          }).catch(() => {});
         }
       } else {
         const { data: members } = await supabase
@@ -94,6 +105,13 @@ module.exports = function handleMessaging(io, socket, onlineUsers) {
         for (const m of members || []) {
           if (!onlineUsers.has(m.user_id)) {
             await supabase.from('pending_messages').insert({ ...pendingBase, recipient_id: m.user_id });
+            notifyNewMessage({
+              recipientId: m.user_id,
+              senderName: socket.user?.display_name || 'Someone',
+              conversationId,
+              isGroup: true,
+              groupName: 'Group chat',
+            }).catch(() => {});
           }
         }
       }

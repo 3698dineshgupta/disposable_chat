@@ -27,6 +27,16 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
         <link rel="preconnect" href="https://fonts.googleapis.com" />
         <link rel="preconnect" href="https://fonts.gstatic.com" crossOrigin="" />
         <script src="https://accounts.google.com/gsi/client" async defer></script>
+        {/* Service Worker registration */}
+        <script dangerouslySetInnerHTML={{ __html: `
+          if ('serviceWorker' in navigator) {
+            window.addEventListener('load', function() {
+              navigator.serviceWorker.register('/sw.js').catch(function(err) {
+                console.warn('[SW] Registration failed:', err);
+              });
+            });
+          }
+        ` }} />
       </head>
       <body className="h-screen overflow-hidden bg-chat-bg text-gray-900 dark:text-gray-100 font-sans antialiased">
         <Providers>{children}</Providers>

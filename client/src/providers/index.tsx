@@ -6,7 +6,11 @@ import { Toaster } from 'react-hot-toast';
 import { useUIStore } from '@/store/ui';
 import { useAuthStore } from '@/store/auth';
 import { useSocketSetup } from '@/hooks/useSocket';
-import { authApi, setAccessToken } from '@/lib/api';
+import { useAutoReply } from '@/hooks/useAutoReply';
+import { useAIStore } from '@/store/ai';
+import { authApi, aiApi, setAccessToken } from '@/lib/api';
+import { getMessages } from '@/lib/db/index';
+import { useChatStore } from '@/store/chat';
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -65,6 +69,79 @@ function SocketManager() {
   return null;
 }
 
+/* Runs the AI auto-reply loop — always mounted when user is authenticated */
+function AIManager() {
+  useAutoReply();
+  return null;
+}
+
+/* Load AI settings for all conversations on startup + keep style profile fresh */
+function AIInitializer() {
+  const { user } = useAuthStore();
+  const { conversations } = useChatStore();
+  const { bulkSetAutoReply, setStyleProfile, styleProfileLoaded } = useAIStore();
+
+  // Load per-conversation AI settings once conversations are available
+  useEffect(() => {
+    if (!user || !conversations.length) return;
+    const load = async () => {
+      try {
+        const results = await Promise.allSettled(
+          conversations.map((c) => aiApi.getSettings(c.id))
+        );
+        const settings: Record<string, boolean> = {};
+        results.forEach((r, i) => {
+          if (r.status === 'fulfilled') {
+            settings[conversations[i].id] = r.value.data.auto_reply_enabled ?? false;
+          }
+        });
+        bulkSetAutoReply(settings);
+      } catch { /* non-fatal */ }
+    };
+    load();
+  }, [user, conversations.length]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Load and periodically refresh style profile
+  useEffect(() => {
+    if (!user || styleProfileLoaded) return;
+    const loadStyle = async () => {
+      try {
+        const res = await aiApi.getStyleProfile();
+        setStyleProfile(res.data.profile);
+      } catch { /* non-fatal */ }
+    };
+    loadStyle();
+  }, [user, styleProfileLoaded]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Periodically refresh the writing style profile from recent sent messages
+  useEffect(() => {
+    if (!user) return;
+    const updateStyle = async () => {
+      try {
+        // Collect user's own recent messages from all conversations
+        const allMessages: string[] = [];
+        for (const conv of conversations.slice(0, 10)) {
+          const msgs = await getMessages(conv.id, 30);
+          const mine = msgs.filter((m) => m.senderId === user.id && m.text && m.type === 'text');
+          allMessages.push(...mine.map((m) => m.text!));
+        }
+        if (allMessages.length >= 10) {
+          await aiApi.updateStyleProfile(allMessages.slice(0, 150));
+          const res = await aiApi.getStyleProfile();
+          setStyleProfile(res.data.profile);
+        }
+      } catch { /* non-fatal */ }
+    };
+
+    // Update style after 5s on startup, then every 10 minutes
+    const t = setTimeout(updateStyle, 5000);
+    const interval = setInterval(updateStyle, 10 * 60 * 1000);
+    return () => { clearTimeout(t); clearInterval(interval); };
+  }, [user]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  return null;
+}
+
 function MobileViewDetector() {
   const { setMobileView } = useUIStore();
   useEffect(() => {
@@ -91,6 +168,8 @@ export default function Providers({ children }: { children: React.ReactNode }) {
       <ThemeManager />
       <AuthInitializer />
       <SocketManager />
+      <AIManager />
+      <AIInitializer />
       <MobileViewDetector />
       {children}
       <Toaster

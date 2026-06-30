@@ -1,14 +1,15 @@
 'use client';
 
-import { Phone, Video, Search, MoreVertical, ArrowLeft, Shield, Archive, BellOff, Trash2, Lock, X } from 'lucide-react';
-import { useState } from 'react';
+import { Phone, Video, Search, MoreVertical, ArrowLeft, Lock, X, BellOff, Archive, Bot, BotOff } from 'lucide-react';
+import { useState, useCallback } from 'react';
 import Avatar from '@/components/ui/Avatar';
 import { useUIStore } from '@/store/ui';
 import { useChatStore } from '@/store/chat';
 import { useCallStore } from '@/store/call';
+import { useAIStore } from '@/store/ai';
 import { getSocket } from '@/lib/socket';
 import { useAuthStore } from '@/store/auth';
-import { conversationsApi } from '@/lib/api';
+import { conversationsApi, aiApi } from '@/lib/api';
 import { formatLastSeen, getConversationName, getConversationAvatar } from '@/lib/utils';
 import type { Conversation } from '@/types';
 import toast from 'react-hot-toast';
@@ -23,8 +24,14 @@ export default function ChatHeader({ conversation, onSearchToggle }: Props) {
   const { typingUsers, onlineUsers, updateConversation } = useChatStore();
   const { startCall } = useCallStore();
   const { user } = useAuthStore();
+  const { autoReplyEnabled, isGenerating, setAutoReply } = useAIStore();
   const [showMenu, setShowMenu]         = useState(false);
   const [showEncInfo, setShowEncInfo]   = useState(false);
+  const [showAIInfo, setShowAIInfo]     = useState(false);
+  const [aiToggling, setAIToggling]     = useState(false);
+
+  const aiEnabled = autoReplyEnabled[conversation.id] ?? false;
+  const aiThinking = isGenerating[conversation.id] ?? false;
 
   const name   = getConversationName(conversation);
   const avatar = getConversationAvatar(conversation);
@@ -57,6 +64,43 @@ export default function ChatHeader({ conversation, onSearchToggle }: Props) {
       isInitiator: true,
     });
   };
+
+  const handleAIToggle = useCallback(async () => {
+    if (aiToggling) return;
+    const newState = !aiEnabled;
+    setAIToggling(true);
+    try {
+      // Show E2EE warning when enabling
+      if (newState) {
+        setShowAIInfo(true);
+        setAIToggling(false);
+        return;
+      }
+      setAutoReply(conversation.id, false);
+      await aiApi.setAutoReply(conversation.id, false);
+      toast.success('AI auto-reply disabled');
+    } catch {
+      toast.error('Failed to update AI settings');
+    } finally {
+      setAIToggling(false);
+      setShowMenu(false);
+    }
+  }, [aiEnabled, aiToggling, conversation.id, setAutoReply]);
+
+  const confirmEnableAI = useCallback(async () => {
+    setShowAIInfo(false);
+    setAIToggling(true);
+    try {
+      setAutoReply(conversation.id, true);
+      await aiApi.setAutoReply(conversation.id, true);
+      toast.success('AI auto-reply enabled', { icon: '🤖' });
+    } catch {
+      setAutoReply(conversation.id, false);
+      toast.error('Failed to enable AI auto-reply');
+    } finally {
+      setAIToggling(false);
+    }
+  }, [conversation.id, setAutoReply]);
 
   const handleArchive = async () => {
     try {
@@ -118,6 +162,33 @@ export default function ChatHeader({ conversation, onSearchToggle }: Props) {
               </button>
             </>
           )}
+          {/* AI toggle button */}
+          {conversation.type === 'direct' && (
+            <button
+              onClick={handleAIToggle}
+              disabled={aiToggling}
+              title={aiEnabled ? 'AI auto-reply ON — click to disable' : 'Enable AI auto-reply'}
+              style={{
+                ...iconBtnStyle,
+                background: aiEnabled ? 'rgba(var(--brand),0.15)' : 'none',
+                position: 'relative',
+              }}
+            >
+              {aiEnabled
+                ? <Bot size={20} color="rgb(var(--brand))" />
+                : <Bot size={20} color="rgb(var(--text-secondary))" />
+              }
+              {aiThinking && (
+                <span style={{
+                  position: 'absolute', top: 4, right: 4,
+                  width: 8, height: 8, borderRadius: '50%',
+                  background: 'rgb(var(--brand))',
+                  animation: 'pulse-ring 1.2s ease infinite',
+                }} />
+              )}
+            </button>
+          )}
+
           <button onClick={onSearchToggle} style={iconBtnStyle} title="Search">
             <Search size={20} color="rgb(var(--text-secondary))" />
           </button>
@@ -139,6 +210,13 @@ export default function ChatHeader({ conversation, onSearchToggle }: Props) {
                   boxShadow: '0 4px 20px rgba(0,0,0,0.12), 0 1px 4px rgba(0,0,0,0.06)',
                   overflow: 'hidden', padding: '4px 0',
                 }}>
+                  {conversation.type === 'direct' && (
+                    <DropdownItem
+                      icon={aiEnabled ? <BotOff size={16} /> : <Bot size={16} />}
+                      label={aiEnabled ? 'Disable AI auto-reply' : 'Enable AI auto-reply'}
+                      onClick={handleAIToggle}
+                    />
+                  )}
                   <DropdownItem icon={<BellOff size={16} />} label={conversation.is_muted ? 'Unmute notifications' : 'Mute notifications'} onClick={handleMute} />
                   <DropdownItem icon={<Archive size={16} />} label="Archive chat" onClick={handleArchive} />
                   <DropdownItem icon={<Lock size={16} />} label="Encryption info"
@@ -149,6 +227,62 @@ export default function ChatHeader({ conversation, onSearchToggle }: Props) {
           </div>
         </div>
       </div>
+
+      {/* AI consent modal — shown before enabling */}
+      {showAIInfo && (
+        <div
+          style={{ position: 'fixed', inset: 0, zIndex: 300, background: 'rgba(0,0,0,0.5)', backdropFilter: 'blur(6px)', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 20 }}
+          onClick={() => setShowAIInfo(false)}
+        >
+          <div
+            onClick={(e) => e.stopPropagation()}
+            style={{ background: 'rgb(var(--bg-elevated))', borderRadius: 20, padding: '28px 24px', width: '100%', maxWidth: 400, boxShadow: '0 20px 60px rgba(0,0,0,0.2)', border: '1px solid rgba(var(--chat-border), 0.3)' }}
+          >
+            <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 20 }}>
+              <div style={{ width: 44, height: 44, borderRadius: '50%', background: 'rgba(var(--brand),0.12)', display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
+                <Bot size={22} color="rgb(var(--brand))" />
+              </div>
+              <div>
+                <p style={{ margin: 0, fontWeight: 700, fontSize: 17, color: 'rgb(var(--text-primary))' }}>Enable AI Auto-Reply?</p>
+                <p style={{ margin: '2px 0 0', fontSize: 12, color: 'rgb(var(--text-muted))' }}>Powered by Llama 3.1 8B</p>
+              </div>
+            </div>
+
+            <div style={{ background: 'rgba(255,170,0,0.08)', border: '1px solid rgba(255,170,0,0.25)', borderRadius: 12, padding: '12px 14px', marginBottom: 16 }}>
+              <p style={{ margin: 0, fontSize: 13, color: 'rgb(var(--text-primary))', lineHeight: 1.6 }}>
+                ⚠️ <strong>Privacy notice:</strong> When AI auto-reply is enabled, message content from this conversation is processed by our AI backend to generate replies. This means messages in this chat are <em>no longer fully end-to-end encrypted</em> on the server side.
+              </p>
+            </div>
+
+            {[
+              { label: 'What it does', value: 'Automatically replies to incoming messages as you, mimicking your writing style' },
+              { label: 'Data handling', value: 'Message context is sent to NVIDIA Llama API to generate replies — never stored' },
+              { label: 'Model', value: 'Meta Llama 3.1 8B Instruct (via NVIDIA NIM)' },
+              { label: 'Control', value: 'You can disable it anytime from this header or the menu' },
+            ].map(({ label, value }) => (
+              <div key={label} style={{ display: 'flex', gap: 12, padding: '8px 0', borderBottom: '1px solid rgba(var(--chat-border),0.3)' }}>
+                <span style={{ fontSize: 12, color: 'rgb(var(--text-muted))', flexShrink: 0, width: 90, paddingTop: 1 }}>{label}</span>
+                <span style={{ fontSize: 12.5, color: 'rgb(var(--text-primary))', lineHeight: 1.5 }}>{value}</span>
+              </div>
+            ))}
+
+            <div style={{ display: 'flex', gap: 10, marginTop: 20 }}>
+              <button
+                onClick={() => setShowAIInfo(false)}
+                style={{ flex: 1, padding: '11px 0', borderRadius: 12, border: '1px solid rgba(var(--chat-border),0.5)', background: 'transparent', color: 'rgb(var(--text-secondary))', fontSize: 14, fontWeight: 600, cursor: 'pointer', fontFamily: 'inherit' }}
+              >
+                Cancel
+              </button>
+              <button
+                onClick={confirmEnableAI}
+                style={{ flex: 1, padding: '11px 0', borderRadius: 12, border: 'none', background: 'rgb(var(--brand))', color: 'white', fontSize: 14, fontWeight: 600, cursor: 'pointer', fontFamily: 'inherit' }}
+              >
+                Enable AI
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Encryption info modal */}
       {showEncInfo && (

@@ -185,7 +185,20 @@ router.put('/me/contacts/:contactId/block', authenticate, async (req, res) => {
 router.post('/me/push', authenticate, async (req, res) => {
   try {
     const { subscription } = req.body;
-    await supabase.from('users').update({ push_subscription: subscription }).eq('id', req.user.id);
+    if (!subscription?.endpoint) return res.status(400).json({ error: 'Invalid subscription' });
+
+    // Store in new push_subscriptions table (supports multiple devices)
+    await supabase.from('push_subscriptions').upsert({
+      user_id: req.user.id,
+      subscription,
+      user_agent: req.headers['user-agent']?.slice(0, 200) ?? null,
+    }, { onConflict: 'user_id,subscription->>"endpoint"' }).catch(() => {
+      // Fallback: upsert may fail if unique constraint not yet applied
+    });
+
+    // Also keep legacy push_subscription column in users for backwards compat
+    await supabase.from('users').update({ push_subscription: subscription }).eq('id', req.user.id).catch(() => {});
+
     res.json({ success: true });
   } catch (err) {
     res.status(500).json({ error: 'Failed to save subscription' });
