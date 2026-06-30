@@ -5,10 +5,30 @@ const { authenticate } = require('../middleware/auth');
 
 const router = express.Router();
 
-/* ── Metered.ca credentials cache (TTL = 1 hour) ── */
+/* ── Metered.ca credentials cache (TTL = 5 min — short so env-var changes take effect quickly) ── */
 let _meteredCache = null;
 let _meteredCacheAt = 0;
-const METERED_CACHE_TTL = 60 * 60 * 1000; // 1 hour
+const METERED_CACHE_TTL = 5 * 60 * 1000; // 5 minutes
+
+/* ── Public TURN fallback ────────────────────────────────────────────────────
+ * Used when Metered.ca credentials are missing/empty AND TURN_URLS is not set.
+ * openrelay.metered.ca is Metered.ca's public demo relay — free, rate-limited,
+ * suitable for testing/small deployments. Replace with a private TURN server
+ * for production traffic.
+ * ─────────────────────────────────────────────────────────────────────────── */
+const PUBLIC_TURN_FALLBACK = [
+  { urls: 'stun:openrelay.metered.ca:80' },
+  {
+    urls: [
+      'turn:openrelay.metered.ca:80',
+      'turn:openrelay.metered.ca:443',
+      'turn:openrelay.metered.ca:443?transport=tcp',
+      'turns:openrelay.metered.ca:443',
+    ],
+    username:   'openrelayproject',
+    credential: 'openrelayproject',
+  },
+];
 
 async function fetchMeteredServers() {
   const domain = process.env.METERED_DOMAIN;
@@ -75,6 +95,22 @@ router.get('/ice-servers', authenticate, async (req, res) => {
         credential: process.env.TURN_CREDENTIAL || '',
       });
     }
+
+    // If still no TURN relay, add public fallback so calls work across networks
+    const hasTurn = servers.some(s => {
+      const u = Array.isArray(s.urls) ? s.urls : [s.urls ?? ''];
+      return u.some(x => typeof x === 'string' && (x.startsWith('turn:') || x.startsWith('turns:')));
+    });
+    if (!hasTurn) {
+      servers.push(...PUBLIC_TURN_FALLBACK);
+      console.log('[ICE] No private TURN configured — using public openrelay.metered.ca fallback');
+    }
+
+    const totalTurn = servers.filter(s => {
+      const u = Array.isArray(s.urls) ? s.urls : [s.urls ?? ''];
+      return u.some(x => typeof x === 'string' && (x.startsWith('turn:') || x.startsWith('turns:')));
+    }).length;
+    console.log(`[ICE] returning ${servers.length} total ICE servers, ${totalTurn} with TURN`);
 
     res.json({ iceServers: servers });
   } catch (err) {

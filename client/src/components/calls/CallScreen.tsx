@@ -230,6 +230,15 @@ export default function CallScreen() {
     pc.ontrack = (e) => {
       log(`ontrack: kind=${e.track.kind} streams=${e.streams.length}`);
       const track = e.track;
+
+      // Helper: play an element; retry via loadedmetadata if autoPlay policy blocks
+      const safePlay = (el: HTMLMediaElement) => {
+        el.play().catch(() => {
+          const onReady = () => { el.play().catch(() => {}); el.removeEventListener('loadedmetadata', onReady); };
+          el.addEventListener('loadedmetadata', onReady);
+        });
+      };
+
       if (track.kind === 'audio') {
         if (remoteAudioRef.current) {
           if (!(remoteAudioRef.current.srcObject instanceof MediaStream)) {
@@ -237,7 +246,7 @@ export default function CallScreen() {
           }
           (remoteAudioRef.current.srcObject as MediaStream).addTrack(track);
           remoteAudioRef.current.muted = !speaker;
-          remoteAudioRef.current.play().catch(() => {});
+          safePlay(remoteAudioRef.current);
         }
       } else if (track.kind === 'video') {
         if (remoteVideoRef.current) {
@@ -245,7 +254,7 @@ export default function CallScreen() {
             remoteVideoRef.current.srcObject = new MediaStream();
           }
           (remoteVideoRef.current.srcObject as MediaStream).addTrack(track);
-          remoteVideoRef.current.play().catch(() => {});
+          safePlay(remoteVideoRef.current);
         }
       }
       if (e.streams?.[0]) setRemoteStream(e.streams[0]);
