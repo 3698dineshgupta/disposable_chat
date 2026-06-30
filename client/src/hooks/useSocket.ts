@@ -4,7 +4,7 @@ import { useEffect, useRef, useCallback } from 'react';
 import { type Socket } from 'socket.io-client';
 import { connectSocket, getSocket } from '@/lib/socket';
 import { messageBus } from '@/lib/messageBus';
-import { updateMessageStatus } from '@/lib/db/index';
+import { updateMessageStatus, clearAllUserData } from '@/lib/db/index';
 import { useAuthStore } from '@/store/auth';
 import { useChatStore, type RawIncoming } from '@/store/chat';
 import { useCallStore } from '@/store/call';
@@ -137,6 +137,9 @@ export function useSocketSetup() {
 
     /* ── Single-device enforcement ── */
     socket.on('session:replaced', () => {
+      clearAllUserData().catch(() => {});
+      localStorage.removeItem('zapchat-active-user');
+      useChatStore.getState().setConversations([]);
       useAuthStore.getState().logout();
       toast.error('Signed in from another device. You have been logged out.', { duration: 5000 });
     });

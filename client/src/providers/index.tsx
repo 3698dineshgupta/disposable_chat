@@ -9,7 +9,7 @@ import { useSocketSetup } from '@/hooks/useSocket';
 import { useAutoReply } from '@/hooks/useAutoReply';
 import { useAIStore } from '@/store/ai';
 import { authApi, aiApi, setAccessToken } from '@/lib/api';
-import { getMessages } from '@/lib/db/index';
+import { getMessages, clearAllUserData } from '@/lib/db/index';
 import { useChatStore } from '@/store/chat';
 
 const queryClient = new QueryClient({
@@ -45,7 +45,15 @@ function AuthInitializer() {
   useEffect(() => {
     const init = async () => {
       if (user) {
-        // Persisted user exists — try to get a fresh access token via httpOnly cookie
+        // Check if the IndexedDB belongs to a DIFFERENT user (device shared between users).
+        // If so, wipe it before loading data so we never show another user's messages.
+        const storedUserId = localStorage.getItem('zapchat-active-user');
+        if (storedUserId && storedUserId !== user.id) {
+          await clearAllUserData();
+        }
+        localStorage.setItem('zapchat-active-user', user.id);
+
+        // Try to get a fresh access token via httpOnly cookie
         try {
           const res = await authApi.refresh();
           const newToken: string = res.data.accessToken;
@@ -53,6 +61,8 @@ function AuthInitializer() {
           login(user, newToken);
         } catch {
           // Refresh failed — session expired, single-device kicked, or cookie missing
+          await clearAllUserData();
+          localStorage.removeItem('zapchat-active-user');
           logout();
         }
       }

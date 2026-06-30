@@ -155,3 +155,15 @@ export async function getPendingQueue() {
 export async function clearConversationMessages(conversationId: string): Promise<void> {
   await getDB().messages.where('conversationId').equals(conversationId).delete();
 }
+
+/* ── Wipe all user data (call on logout / user switch to prevent data leaks) ── */
+export async function clearAllUserData(): Promise<void> {
+  const db = getDB();
+  await db.transaction('rw', db.messages, db.conversations, db.contacts, db.pendingQueue, async () => {
+    await db.messages.clear();
+    await db.conversations.clear();
+    await db.contacts.clear();
+    await db.pendingQueue.clear();
+    // Keep keyStore — keys survive logout so user doesn't need to re-generate on next login
+  });
+}

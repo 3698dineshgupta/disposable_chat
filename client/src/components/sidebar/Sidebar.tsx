@@ -6,6 +6,8 @@ import { useUIStore } from '@/store/ui';
 import { useAuthStore } from '@/store/auth';
 import { authApi } from '@/lib/api';
 import { disconnectSocket } from '@/lib/socket';
+import { clearAllUserData } from '@/lib/db/index';
+import { useChatStore } from '@/store/chat';
 import Avatar from '@/components/ui/Avatar';
 import ConversationList from './ConversationList';
 import CallHistory from './CallHistory';
@@ -31,6 +33,9 @@ export default function Sidebar() {
   const handleLogout = async () => {
     try { await authApi.logout(); } catch {}
     disconnectSocket();
+    await clearAllUserData();
+    localStorage.removeItem('zapchat-active-user');
+    useChatStore.getState().setConversations([]);
     logout();
     router.push('/login');
     toast.success('Logged out');

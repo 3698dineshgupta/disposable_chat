@@ -80,19 +80,22 @@ module.exports = function handleMessaging(io, socket, onlineUsers) {
       // Broadcast to all sockets that have joined the conversation room.
       socket.to(`conv:${conversationId}`).emit('message:receive', messageEvent);
 
+      // Always persist to pending_messages so the message survives if the
+      // real-time socket emit misses (recipient not in conv room, network blip,
+      // tab in background, etc.). The client cleans up via message:seen which
+      // deletes rows by local_id. For online recipients we ALSO emit directly
+      // to their personal user room — the client deduplicates by localId.
       const pendingBase = { conversation_id: conversationId, sender_id: socket.userId, encrypted_payload: encryptedPayload, message_type: messageType || 'text', local_id: localId };
 
       if (recipientId) {
-        const isOnline = onlineUsers.has(recipientId);
+        // Save to pending regardless of online status — cleaned up by message:seen
+        supabase.from('pending_messages').insert({ ...pendingBase, recipient_id: recipientId }).catch(() => {});
 
-        // Also emit directly to recipient's personal room.
-        // This guarantees delivery even if they haven't joined the conv room yet
-        // (e.g. new conversation created while they're online, or slow reconnect).
-        // The client deduplicates by localId so duplicates are harmless.
+        const isOnline = onlineUsers.has(recipientId);
         if (isOnline) {
+          // Direct delivery to personal room in case recipient hasn't joined conv room
           io.to(`user:${recipientId}`).emit('message:receive', messageEvent);
         } else {
-          await supabase.from('pending_messages').insert({ ...pendingBase, recipient_id: recipientId });
           notifyNewMessage({
             recipientId,
             senderName: socket.user?.display_name || 'Someone',
@@ -108,11 +111,10 @@ module.exports = function handleMessaging(io, socket, onlineUsers) {
           .neq('user_id', socket.userId);
 
         for (const m of members || []) {
+          supabase.from('pending_messages').insert({ ...pendingBase, recipient_id: m.user_id }).catch(() => {});
           if (onlineUsers.has(m.user_id)) {
-            // Emit directly to each online member's personal room too
             io.to(`user:${m.user_id}`).emit('message:receive', messageEvent);
           } else {
-            await supabase.from('pending_messages').insert({ ...pendingBase, recipient_id: m.user_id });
             notifyNewMessage({
               recipientId: m.user_id,
               senderName: socket.user?.display_name || 'Someone',

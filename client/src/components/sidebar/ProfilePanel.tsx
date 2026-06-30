@@ -6,6 +6,8 @@ import { usersApi, authApi } from '@/lib/api';
 import { useAuthStore } from '@/store/auth';
 import { useUIStore } from '@/store/ui';
 import { disconnectSocket } from '@/lib/socket';
+import { clearAllUserData } from '@/lib/db/index';
+import { useChatStore } from '@/store/chat';
 import Avatar from '@/components/ui/Avatar';
 import { useRouter } from 'next/navigation';
 import toast from 'react-hot-toast';
@@ -54,6 +56,9 @@ export default function ProfilePanel({ onClose }: Props) {
   const handleLogout = async () => {
     try { await authApi.logout(); } catch {}
     disconnectSocket();
+    await clearAllUserData();
+    localStorage.removeItem('zapchat-active-user');
+    useChatStore.getState().setConversations([]);
     logout();
     router.push('/login');
     toast.success('Logged out');
